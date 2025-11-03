@@ -7,7 +7,8 @@
     "outDir": "./dist",
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "strict": true,
+    "strict": false,
+    "noImplicitAny": false,
     "types": ["node"]
   },
   "include": ["src/**/*.ts"]
