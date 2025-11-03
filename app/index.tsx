@@ -2,15 +2,37 @@ import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { getAccess, getRefresh } from './lib/auth';
+import { fetchMe } from './lib/authClient';
 
-// Simple authentication check (in real app, use AsyncStorage or secure storage)
+// Check if user has valid authentication tokens and can access protected routes
 const checkAuthStatus = async (): Promise<boolean> => {
-  // Simulate checking for stored auth token
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  
-  // For demo purposes, always return false to show auth flow
-  // In real app: return !!await AsyncStorage.getItem('authToken');
-  return false;
+  try {
+    const accessToken = await getAccess();
+    const refreshToken = await getRefresh();
+    
+    // If no tokens exist, user is not authenticated
+    if (!accessToken && !refreshToken) {
+      return false;
+    }
+    
+    // Try to fetch user profile to validate tokens
+    // This will automatically refresh the token if it's expired
+    await fetchMe();
+    return true;
+    
+  } catch (error) {
+    console.error('Authentication validation failed:', error);
+    // If token validation fails, clear invalid tokens
+    try {
+      const { clearTokens, clearUser } = await import('./lib/auth');
+      await clearTokens();
+      await clearUser();
+    } catch (clearError) {
+      console.error('Failed to clear tokens:', clearError);
+    }
+    return false;
+  }
 };
 
 export default function IndexScreen() {

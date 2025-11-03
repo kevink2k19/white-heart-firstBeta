@@ -32,6 +32,8 @@ import {
 } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { clearTokens, clearUser } from '../lib/auth';
+
 
 interface SettingItem {
   id: string;
@@ -69,18 +71,26 @@ export default function SettingsScreen() {
 
 const handleLogout = () => {
   Alert.alert(
-    t('settings.logout'),
-    t('settings.logoutConfirm'),
+    'Logout',
+    'Are you sure you want to logout?',
     [
-      { text: t('common.cancel'), style: 'cancel' },
+      { text: 'Cancel', style: 'cancel' },
       {
-        text: t('settings.logout'),
+        text: 'Logout',
         style: 'destructive',
         onPress: async () => {
-          // TODO: clear tokens/session here (e.g., AsyncStorage/SecureStore)
-
-          // Important: point to /auth/login
-          router.replace('/auth/login');
+          try {
+            // Clear all authentication data
+            await clearTokens();
+            await clearUser();
+            
+            console.log('User logged out successfully');
+          } catch (error) {
+            console.error('Error during logout:', error);
+          } finally {
+            // Navigate back to login screen
+            router.replace('/auth/login');
+          }
         },
       },
     ]
@@ -89,70 +99,71 @@ const handleLogout = () => {
 
 
 
+
   const settingSections = [
-    {
-      title: 'Driver Notifications',
-      items: [
-        {
-          id: 'driver_notifications',
-          title: 'Driver Mode Notifications',
-          subtitle: 'Receive notifications when in driver mode',
-          icon: Bell,
-          type: 'toggle' as const,
-          value: driverModeNotifications,
-          onToggle: setDriverModeNotifications,
-        },
-        {
-          id: 'order_alerts',
-          title: 'New Order Alerts',
-          subtitle: 'Get notified when new orders are available',
-          icon: Bell,
-          type: 'toggle' as const,
-          value: orderAlerts,
-          onToggle: setOrderAlerts,
-        },
-        {
-          id: 'voice_alerts',
-          title: 'Voice Alerts',
-          subtitle: 'Hear audio notifications for orders',
-          icon: Headphones,
-          type: 'toggle' as const,
-          value: voiceAlerts,
-          onToggle: setVoiceAlerts,
-        },
-      ],
-    },
-    {
-      title: 'Driver Operations',
-      items: [
-        {
-          id: 'auto_accept_orders',
-          title: 'Auto Accept Orders',
-          subtitle: 'Automatically accept orders matching your preferences',
-          icon: Car,
-          type: 'toggle' as const,
-          value: autoAcceptOrders,
-          onToggle: setAutoAcceptOrders,
-        },
-        {
-          id: 'offline_mode',
-          title: 'Offline Mode',
-          subtitle: 'Stop receiving new orders',
-          icon: Clock,
-          type: 'toggle' as const,
-          value: offlineMode,
-          onToggle: setOfflineMode,
-        },
-        {
-          id: 'driver_preferences',
-          title: 'Driver Preferences',
-          subtitle: 'Set your driving preferences and zones',
-          icon: Navigation,
-          type: 'navigation' as const,
-          onPress: () => Alert.alert('Driver Preferences', 'Driver preferences coming soon'),
-        },
-      ],
-    },
+    // {
+    //   title: 'Driver Notifications',
+    //   items: [
+    //     {
+    //       id: 'driver_notifications',
+    //       title: 'Driver Mode Notifications',
+    //       subtitle: 'Receive notifications when in driver mode',
+    //       icon: Bell,
+    //       type: 'toggle' as const,
+    //       value: driverModeNotifications,
+    //       onToggle: setDriverModeNotifications,
+    //     },
+    //     {
+    //       id: 'order_alerts',
+    //       title: 'New Order Alerts',
+    //       subtitle: 'Get notified when new orders are available',
+    //       icon: Bell,
+    //       type: 'toggle' as const,
+    //       value: orderAlerts,
+    //       onToggle: setOrderAlerts,
+    //     },
+    //     {
+    //       id: 'voice_alerts',
+    //       title: 'Voice Alerts',
+    //       subtitle: 'Hear audio notifications for orders',
+    //       icon: Headphones,
+    //       type: 'toggle' as const,
+    //       value: voiceAlerts,
+    //       onToggle: setVoiceAlerts,
+    //     },
+    //   ],
+    // },
+    // {
+    //   title: 'Driver Operations',
+    //   items: [
+    //     {
+    //       id: 'auto_accept_orders',
+    //       title: 'Auto Accept Orders',
+    //       subtitle: 'Automatically accept orders matching your preferences',
+    //       icon: Car,
+    //       type: 'toggle' as const,
+    //       value: autoAcceptOrders,
+    //       onToggle: setAutoAcceptOrders,
+    //     },
+    //     {
+    //       id: 'offline_mode',
+    //       title: 'Offline Mode',
+    //       subtitle: 'Stop receiving new orders',
+    //       icon: Clock,
+    //       type: 'toggle' as const,
+    //       value: offlineMode,
+    //       onToggle: setOfflineMode,
+    //     },
+    //     {
+    //       id: 'driver_preferences',
+    //       title: 'Driver Preferences',
+    //       subtitle: 'Set your driving preferences and zones',
+    //       icon: Navigation,
+    //       type: 'navigation' as const,
+    //       onPress: () => Alert.alert('Driver Preferences', 'Driver preferences coming soon'),
+    //     },
+    //   ],
+    // },
     {
       title: 'App Preferences',
       items: [
@@ -190,48 +201,6 @@ const handleLogout = () => {
           type: 'toggle' as const,
           value: darkMode,
           onToggle: setDarkMode,
-        },
-      ],
-    },
-    {
-      title: 'Earnings & Payments',
-      items: [
-        {
-          id: 'earnings_summary',
-          title: 'Earnings Summary',
-          subtitle: 'View your daily, weekly, and monthly earnings',
-          icon: DollarSign,
-          type: 'navigation' as const,
-          onPress: () => Alert.alert('Earnings Summary', 'Earnings summary coming soon'),
-        },
-        {
-          id: 'payment_methods',
-          title: 'Payment Methods',
-          subtitle: 'Manage your payout methods',
-          icon: CreditCard,
-          type: 'navigation' as const,
-          onPress: () => Alert.alert('Payment Methods', 'Payment methods coming soon'),
-        },
-      ],
-    },
-    {
-      title: 'Safety & Security',
-      items: [
-        {
-          id: 'safety_settings',
-          title: 'Safety Settings',
-          subtitle: 'Emergency contacts and safety features',
-          icon: Shield,
-          type: 'navigation' as const,
-          onPress: () => Alert.alert('Safety Settings', 'Safety settings coming soon'),
-        },
-        {
-          id: 'device_settings',
-          title: 'Device Settings',
-          subtitle: 'App permissions and device settings',
-          icon: Smartphone,
-          type: 'navigation' as const,
-          onPress: () => Alert.alert('Device Settings', 'Device settings coming soon'),
         },
       ],
     },

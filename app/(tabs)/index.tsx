@@ -1,1006 +1,613 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Alert,
-  RefreshControl,
+  TextInput,
   Modal,
-  ActivityIndicator,
-  Animated,
+  Alert,
+  RefreshControl, // ⬅️ NEW
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { MapPin, Clock, DollarSign, Users, X, Check, Star, Navigation, Phone } from 'lucide-react-native';
-import { useRouter } from 'expo-router';
-import { Linking } from 'react-native';
+import { Users, Plus, X, Send, MessageCircle } from 'lucide-react-native';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { fetchMe } from '../lib/authClient';
+import { fetchMyGroups, createGroup } from '../lib/chatApi';
+import type { ServerGroup } from '../lib/chatApi';
+import { getSocket } from '../lib/socket'; // ⬅️ NEW
 
-interface PassengerOrder {
+type AppRole = 'SUPER_ADMIN' | 'ADMIN' | 'MODERATOR' | 'USER';
+
+type ChatGroup = {
   id: string;
-  passengerName: string;
-  passengerPhone: string;
-  passengerRating: number;
-  pickupLocation: string;
-  destination: string;
-  timestamp: string;
-  fareAmount: number;
-  distance: string;
-  estimatedDuration: string;
-  status: 'pending' | 'accepted' | 'declined' | 'sent_to_group';
-  createdAt: number;
-  visibilityState: 'admin' | 'moderator' | 'driver';
-  remainingTime: number;
-}
+  name: string;
+  memberCount: number;
+  lastMessage: string;
+  lastMessageTime: string;
+  unreadCount: number;
+};
 
-const mockOrderTemplates = [
-  {
-    passengerName: 'Aung Kyaw',
-    passengerPhone: '+95 9 123 456 789',
-    passengerRating: 4.8,
-    pickupLocation: 'Shwedagon Pagoda, Yangon',
-    destination: 'Yangon International Airport',
-    fareAmount: 15000,
-    distance: '18.5 km',
-    estimatedDuration: '35 min',
-  },
-  {
-    passengerName: 'Ma Thida',
-    passengerPhone: '+95 9 987 654 321',
-    passengerRating: 4.6,
-    pickupLocation: 'Junction City Shopping Center',
-    destination: 'University of Yangon',
-    fareAmount: 8500,
-    distance: '12.3 km',
-    estimatedDuration: '25 min',
-  },
-  {
-    passengerName: 'Ko Min Thu',
-    passengerPhone: '+95 9 555 123 456',
-    passengerRating: 4.9,
-    pickupLocation: 'Bogyoke Market',
-    destination: 'Kandawgyi Lake',
-    fareAmount: 6500,
-    distance: '8.2 km',
-    estimatedDuration: '18 min',
-  },
-  {
-    passengerName: 'Daw Khin',
-    passengerPhone: '+95 9 777 888 999',
-    passengerRating: 4.7,
-    pickupLocation: 'Myanmar Plaza',
-    destination: 'Inya Lake Hotel',
-    fareAmount: 12000,
-    distance: '15.1 km',
-    estimatedDuration: '28 min',
-  },
-  {
-    passengerName: 'Ko Zaw',
-    passengerPhone: '+95 9 111 222 333',
-    passengerRating: 4.5,
-    pickupLocation: 'Sule Pagoda',
-    destination: 'Mandalay Hill',
-    fareAmount: 25000,
-    distance: '28.3 km',
-    estimatedDuration: '45 min',
-  },
-  {
-    passengerName: 'Ma Aye',
-    passengerPhone: '+95 9 444 555 666',
-    passengerRating: 4.9,
-    pickupLocation: 'Inle Lake Resort',
-    destination: 'Heho Airport',
-    fareAmount: 18000,
-    distance: '22.1 km',
-    estimatedDuration: '38 min',
-  },
-];
+type PrivateChat = {
+  id: string;
+  name: string;
+  lastMessage: string;
+  lastMessageTime: string;
+  unreadCount: number;
+  isOnline: boolean;
+};
 
-export default function OrdersScreen() {
+const timeAgo = (iso?: string) => {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const s = Math.max(0, Math.floor((now - then) / 1000));
+  if (s < 5) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hr${h > 1 ? 's' : ''} ago`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d} day${d > 1 ? 's' : ''} ago`;
+  return new Date(iso).toLocaleDateString();
+};
+
+/* Create Group Modal */
+type CreateGroupModalProps = {
+  visible: boolean;
+  canManage: boolean;
+  creating: boolean;
+  groupName: string;
+  groupDesc: string;
+  onChangeGroupName: (s: string) => void;
+  onChangeGroupDesc: (s: string) => void;
+  onClose: () => void;
+  onCreate: () => void;
+};
+
+const CreateGroupModal = React.memo(function CreateGroupModal({
+  visible, canManage, creating, groupName, groupDesc,
+  onChangeGroupName, onChangeGroupDesc, onClose, onCreate,
+}: CreateGroupModalProps) {
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Create Group</Text>
+            <TouchableOpacity onPress={onClose} style={styles.modalClose}>
+              <X size={24} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.modalBody}>
+            <Text style={styles.formLabel}>Group Name</Text>
+            <TextInput
+              style={styles.formInput}
+              value={groupName}
+              onChangeText={onChangeGroupName}
+              placeholder="e.g., Downtown Drivers"
+              autoFocus
+            />
+
+            <View style={{ height: 12 }} />
+            <Text style={styles.formLabel}>Description</Text>
+            <TextInput
+              style={[styles.formInput, styles.textArea]}
+              value={groupDesc}
+              onChangeText={onChangeGroupDesc}
+              placeholder="Optional description (coverage area, shift, rules...)"
+              multiline
+              numberOfLines={3}
+            />
+          </View>
+
+          <View style={styles.modalActions}>
+            <TouchableOpacity style={styles.modalCancel} disabled={creating} onPress={onClose}>
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.modalSubmit}
+              disabled={creating || !canManage}
+              onPress={onCreate}
+            >
+              <Send size={16} color="white" />
+              <Text style={styles.modalSubmitText}>{creating ? 'Creating…' : 'Create'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+});
+
+/* Screen */
+export default function MessagingScreen() {
   const router = useRouter();
-  const [orders, setOrders] = useState<PassengerOrder[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadingAction, setLoadingAction] = useState<string | null>(null);
-  const [confirmationModal, setConfirmationModal] = useState<{
-    visible: boolean;
-    orderId: string;
-    action: 'accept' | 'decline' | 'send_to_group';
-    orderDetails?: PassengerOrder;
-  }>({
-    visible: false,
-    orderId: '',
-    action: 'accept',
-  });
 
-  const orderIdCounter = useRef(1);
-  const orderGenerationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const visibilityTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const [myId, setMyId] = useState<string>('');               // ⬅️ NEW
+  const [role, setRole] = useState<AppRole>('USER');
+  const canManage = role === 'SUPER_ADMIN' || role === 'ADMIN';
 
-  // Generate random order intervals (15-45 seconds)
-  const getRandomInterval = () => Math.floor(Math.random() * 30000) + 15000;
+  // Tab state
+  const [activeTab, setActiveTab] = useState<'groups' | 'private'>('groups');
 
-  const generateNewOrder = () => {
-    const template = mockOrderTemplates[Math.floor(Math.random() * mockOrderTemplates.length)];
-    const now = Date.now();
-    
-    const newOrder: PassengerOrder = {
-      id: `order_${orderIdCounter.current++}`,
-      ...template,
-      timestamp: 'Just now',
-      status: 'pending',
-      createdAt: now,
-      visibilityState: 'admin',
-      remainingTime: 10,
-    };
+  const [groups, setGroups] = useState<ChatGroup[]>([]);
+  const [privateChats, setPrivateChats] = useState<PrivateChat[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);        // ⬅️ NEW
+  const [userPresence, setUserPresence] = useState<Record<string, { isOnline: boolean; lastSeen?: string }>>({});
 
-    setOrders(prevOrders => [newOrder, ...prevOrders]);
-    startVisibilityTimer(newOrder.id);
-  };
-
-  const startVisibilityTimer = (orderId: string) => {
-    let adminTimeLeft = 10;
-    let moderatorTimeLeft = 10;
-    let currentPhase: 'admin' | 'moderator' = 'admin';
-    
-    const timer = setInterval(() => {
-      if (currentPhase === 'admin') {
-        adminTimeLeft--;
-      } else if (currentPhase === 'moderator') {
-        moderatorTimeLeft--;
-      }
-      
-      setOrders(prevOrders => 
-        prevOrders.map(order => {
-          if (order.id === orderId) {
-            if (order.visibilityState === 'admin' && adminTimeLeft <= 0) {
-              currentPhase = 'moderator';
-              moderatorTimeLeft = 10; // Reset moderator timer
-              return {
-                ...order,
-                visibilityState: 'moderator',
-                remainingTime: moderatorTimeLeft,
-              };
-            } else if (order.visibilityState === 'moderator' && moderatorTimeLeft <= 0) {
-              return {
-                ...order,
-                visibilityState: 'driver',
-                remainingTime: 0,
-              };
-            } else {
-              return {
-                ...order,
-                remainingTime: Math.max(0, currentPhase === 'admin' ? adminTimeLeft : moderatorTimeLeft),
-              };
-            }
-          }
-          return order;
-        })
-      );
-
-      if ((currentPhase === 'admin' && adminTimeLeft <= 0) || (currentPhase === 'moderator' && moderatorTimeLeft <= 0)) {
-        setOrders(prevOrders => {
-          const order = prevOrders.find(o => o.id === orderId);
-          if (order?.visibilityState === 'driver') {
-            clearInterval(timer);
-            visibilityTimers.current.delete(orderId);
-          }
-          return prevOrders;
-        });
-      }
-    }, 1000);
-
-    visibilityTimers.current.set(orderId, timer);
-  };
-
-  const scheduleNextOrder = () => {
-    const interval = getRandomInterval();
-    orderGenerationTimer.current = setTimeout(() => {
-      generateNewOrder();
-      scheduleNextOrder();
-    }, interval);
-  };
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupDesc, setNewGroupDesc] = useState('');
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    // Generate initial order immediately
-    generateNewOrder();
-    
-    // Schedule subsequent orders
-    scheduleNextOrder();
-
-    return () => {
-      if (orderGenerationTimer.current) {
-        clearTimeout(orderGenerationTimer.current);
-      }
-      visibilityTimers.current.forEach(timer => clearInterval(timer));
-      visibilityTimers.current.clear();
-    };
+    (async () => {
+      try {
+        const me = await fetchMe<{ id: string; role: AppRole }>();
+        if (me?.role) setRole(me.role);
+        if (me?.id) setMyId(me.id);                            // ⬅️ NEW
+      } catch {}
+    })();
   }, []);
 
-  const onRefresh = React.useCallback(() => {
-    setRefreshing(true);
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 2000);
-  }, []);
-
-  const getVisibilityColor = (state: string) => {
-    switch (state) {
-      case 'admin':
-        return '#EF4444'; // Red
-      case 'moderator':
-        return '#F59E0B'; // Orange
-      case 'driver':
-        return '#10B981'; // Green
-      default:
-        return '#6B7280';
-    }
-  };
-
-  const getVisibilityLabel = (state: string, remainingTime: number) => {
-    switch (state) {
-      case 'admin':
-        return `Admin (${remainingTime}s)`;
-      case 'moderator':
-        return `Moderator (${remainingTime}s)`;
-      case 'driver':
-        return 'Driver';
-      default:
-        return 'Driver';
-    }
-  };
-
-  const handleAction = (orderId: string, action: 'accept' | 'decline' | 'send_to_group') => {
-    const order = orders.find(o => o.id === orderId);
-    setConfirmationModal({
-      visible: true,
-      orderId,
-      action,
-      orderDetails: order,
-    });
-  };
-
-  const confirmAction = async () => {
-    const { orderId, action } = confirmationModal;
-    setLoadingAction(orderId);
-    setConfirmationModal({ ...confirmationModal, visible: false });
-
+  const loadGroups = useCallback(async () => {
+    setLoading(true);
     try {
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      // Clear visibility timer for this order
-      const timer = visibilityTimers.current.get(orderId);
-      if (timer) {
-        clearInterval(timer);
-        visibilityTimers.current.delete(orderId);
-      }
-
-      if (action === 'accept') {
-        // Find order data and validate
-        const acceptedOrder = orders.find(order => order.id === orderId);
-        if (acceptedOrder) {
-          // Validate required data before navigation
-          if (!acceptedOrder.passengerName || !acceptedOrder.passengerPhone || !acceptedOrder.pickupLocation) {
-            throw new Error('Incomplete order data. Cannot proceed with navigation.');
-          }
-
-          // Update order status to accepted
-          setOrders(prevOrders =>
-            prevOrders.map(order =>
-              order.id === orderId ? { ...order, status: 'accepted' } : order
-            )
-          );
-
-          // Navigate to navigation screen with complete order data
-          router.push({
-            pathname: '/(tabs)/navigation',
-            params: {
-              orderId: acceptedOrder.id,
-              customerName: acceptedOrder.passengerName,
-              customerPhone: acceptedOrder.passengerPhone,
-              pickupLocation: acceptedOrder.pickupLocation,
-              destination: acceptedOrder.destination,
-              fareAmount: acceptedOrder.fareAmount.toString(),
-              distance: acceptedOrder.distance,
-              estimatedDuration: acceptedOrder.estimatedDuration,
-              customerRating: acceptedOrder.passengerRating.toString(),
-            },
-          });
-        } else {
-          throw new Error('Order not found');
-        }
-      } else {
-        // Update order status for decline or send to group
-        setOrders(prevOrders =>
-          prevOrders.map(order =>
-            order.id === orderId
-              ? { ...order, status: action === 'decline' ? 'declined' : 'sent_to_group' }
-              : order
-          )
-        );
-      }
-
-      let message = '';
-      switch (action) {
-        case 'accept':
-          message = 'Order accepted successfully! Opening navigation...';
-          break;
-        case 'decline':
-          message = 'Order declined. It will be offered to other drivers.';
-          break;
-        case 'send_to_group':
-          message = 'Order sent to driver group for discussion.';
-          break;
-      }
-
-      if (action !== 'accept') {
-        Alert.alert('Success', message);
-      }
-    } catch (error) {
-      console.error('Order action failed:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to process action. Please try again.';
-      Alert.alert(
-        'Action Failed', 
-        errorMessage,
-        [
-          { text: 'OK' },
-          { text: 'Retry', onPress: confirmAction }
-        ]
-      );
-      // Revert order status on error
-      setOrders(prevOrders =>
-        prevOrders.map(order =>
-          order.id === orderId
-            ? { ...order, status: 'pending' }
-            : order
-        )
-      );
+      const serverGroups = await fetchMyGroups(); // ServerGroup[]
+      const uiGroups: ChatGroup[] = serverGroups.map((g: ServerGroup) => ({
+        id: g.id,
+        name: g.name,
+        memberCount: g.memberCount,
+        lastMessage: g.lastMessage || '',
+        lastMessageTime: timeAgo(g.lastMessageAt),
+        unreadCount: g.unreadCount || 0,
+      }));
+      setGroups(uiGroups);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to load groups');
+      setGroups([]);
     } finally {
-      setLoadingAction(null);
+      setLoading(false);
     }
-  };
+  }, []);
 
-  // Handle phone call to passenger
-  const handleCallPassenger = async (phoneNumber: string) => {
+  const loadPrivateChats = useCallback(async () => {
+    setLoading(true);
     try {
-      const phoneUrl = `tel:${phoneNumber}`;
-      const canOpen = await Linking.canOpenURL(phoneUrl);
+      // Import the conversations API
+      const { authFetch } = await import('../lib/authClient');
+      const response = await authFetch('/chat/conversations');
+      const conversations = await response.json();
       
-      if (canOpen) {
-        await Linking.openURL(phoneUrl);
-      } else {
-        Alert.alert('Error', 'Unable to make phone call from this device.');
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to initiate phone call.');
+      // Filter for DM conversations and transform to PrivateChat format
+      const dmConversations = conversations.filter((conv: any) => conv.type === 'DM');
+      const uiPrivateChats: PrivateChat[] = dmConversations.map((conv: any) => {
+        // Get the other participant (not me)
+        const otherParticipant = conv.participants?.find((p: any) => p.id !== myId);
+        const otherParticipantId = otherParticipant?.id;
+        const presence = userPresence[otherParticipantId] || { isOnline: false };
+        
+        // Format last message with sender info
+        let displayMessage = '';
+        let displayTime = '';
+        
+        if (conv.lastMessage) {
+          const isMyMessage = conv.lastMessage.userId === myId;
+          const senderName = isMyMessage ? 'You' : otherParticipant?.name?.split(' ')[0] || 'User';
+          displayMessage = `${senderName}: ${conv.lastMessage.text}`;
+          displayTime = timeAgo(conv.lastMessage.createdAt);
+        } else {
+          displayMessage = 'No messages yet';
+          displayTime = '';
+        }
+        
+        return {
+          id: conv.id,
+          name: otherParticipant?.name || 'Unknown User',
+          lastMessage: displayMessage,
+          lastMessageTime: displayTime,
+          unreadCount: 0, // TODO: implement unread count for DMs
+          isOnline: presence.isOnline,
+        };
+      });
+      setPrivateChats(uiPrivateChats);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to load private chats');
+      setPrivateChats([]);
+    } finally {
+      setLoading(false);
     }
-  };
+  }, [myId, userPresence]);
 
-  const renderStars = (rating: number) => {
-    return Array.from({ length: 5 }, (_, index) => (
-      <Star
-        key={index}
-        size={12}
-        color={index < Math.floor(rating) ? '#F59E0B' : '#E5E7EB'}
-        fill={index < Math.floor(rating) ? '#F59E0B' : '#E5E7EB'}
-      />
-    ));
-  };
-
-  const VisibilityBadge = ({ order }: { order: PassengerOrder }) => {
-    const pulseAnim = useRef(new Animated.Value(1)).current;
-
-    useEffect(() => {
-      if (order.visibilityState !== 'driver') {
-        const pulse = Animated.loop(
-          Animated.sequence([
-            Animated.timing(pulseAnim, {
-              toValue: 1.1,
-              duration: 500,
-              useNativeDriver: true,
-            }),
-            Animated.timing(pulseAnim, {
-              toValue: 1,
-              duration: 500,
-              useNativeDriver: true,
-            }),
-          ])
-        );
-        pulse.start();
-
-        return () => pulse.stop();
+  // Pull-to-refresh handler  ⬇️ NEW
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      if (activeTab === 'groups') {
+        await loadGroups();
+      } else {
+        await loadPrivateChats();
       }
-    }, [order.visibilityState, pulseAnim]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadGroups, loadPrivateChats, activeTab]);
 
-    return (
-      <Animated.View
-        style={[
-          styles.visibilityBadge,
-          { 
-            backgroundColor: getVisibilityColor(order.visibilityState),
-            transform: [{ scale: pulseAnim }]
-          }
-        ]}
+  // initial load
+  useEffect(() => { 
+    if (myId) {
+      loadGroups();
+      loadPrivateChats(); 
+    }
+  }, [loadGroups, loadPrivateChats, myId]);
+
+  // also refresh whenever this screen regains focus
+  useFocusEffect(useCallback(() => { 
+    if (myId) {
+      loadGroups();
+      loadPrivateChats();
+    }
+  }, [loadGroups, loadPrivateChats, myId]));
+
+  // realtime: join all conv rooms, listen for rename/delete and "you were added" events
+  useEffect(() => {
+    let off: undefined | (() => void);
+
+    (async () => {
+      const sock = await getSocket();
+
+      // Join all rooms for this user
+      sock.emit('conversations:joinAll');
+
+      const softRefresh = () => { loadGroups(); }; // keeps logic in one place
+
+      // Rename
+      const onUpdated = (p: { conversationId: string; name?: string }) => {
+        if (!p?.conversationId) return;
+        setGroups(prev => prev.map(g => g.id === p.conversationId ? { ...g, name: p.name ?? g.name } : g));
+      };
+
+      // Delete
+      const onDeleted = (p: { conversationId: string }) => {
+        if (!p?.conversationId) return;
+        setGroups(prev => prev.filter(g => g.id !== p.conversationId));
+      };
+
+      // NEW GROUP visible to you — support several possible server events:
+      // 1) generic "groups:refresh"
+      const onGroupsRefresh = () => softRefresh();
+
+      // 2) you were added to a group (payload may vary)
+      const onMemberAdded = (p: { conversationId?: string; userId?: string; member?: { id?: string } }) => {
+        const addedId = p?.userId ?? p?.member?.id;
+        if (addedId && myId && String(addedId) === String(myId)) {
+          softRefresh();
+        }
+      };
+
+      // 3) group created for you explicitly
+      const onGroupCreated = (p: { conversationId?: string; userIds?: string[]; createdForUserId?: string }) => {
+        const isForMe =
+          (Array.isArray(p?.userIds) && p!.userIds!.some(uid => String(uid) === String(myId))) ||
+          (!!p?.createdForUserId && String(p.createdForUserId) === String(myId));
+        if (isForMe) softRefresh();
+      };
+
+      // Presence event handlers
+      const onPresenceBulk = (data: { [userId: string]: { isOnline: boolean; lastSeen?: string } }) => {
+        setUserPresence(prev => ({ ...prev, ...data }));
+      };
+
+      const onPresenceUpdate = (data: { userId: string; isOnline: boolean; lastSeen?: string }) => {
+        setUserPresence(prev => ({ 
+          ...prev, 
+          [data.userId]: { isOnline: data.isOnline, lastSeen: data.lastSeen } 
+        }));
+      };
+
+      // Message event handlers for updating chat lists
+      const onNewMessage = (data: { conversationId: string; message: any }) => {
+        // Refresh both groups and private chats to update last message
+        loadGroups();
+        loadPrivateChats();
+      };
+
+      sock.on('group:updated', onUpdated);
+      sock.on('group:deleted', onDeleted);
+      sock.on('groups:refresh', onGroupsRefresh);     // optional, if server emits
+      sock.on('member:added', onMemberAdded);         // optional, if server emits
+      sock.on('group:created', onGroupCreated);       // optional, if server emits
+      sock.on('presence:bulk', onPresenceBulk);       // bulk presence data
+      sock.on('presence:update', onPresenceUpdate);   // individual presence updates
+      sock.on('message:new', onNewMessage);           // new message updates
+
+      off = () => {
+        try {
+          sock.off('group:updated', onUpdated);
+          sock.off('group:deleted', onDeleted);
+          sock.off('groups:refresh', onGroupsRefresh);
+          sock.off('member:added', onMemberAdded);
+          sock.off('group:created', onGroupCreated);
+          sock.off('presence:bulk', onPresenceBulk);
+          sock.off('presence:update', onPresenceUpdate);
+          sock.off('message:new', onNewMessage);
+        } catch {}
+      };
+    })();
+
+    return () => { if (off) off(); };
+  }, [loadGroups, loadPrivateChats, myId]); // re-bind if myId changes
+
+  // Update private chats when presence data changes
+  useEffect(() => {
+    if (activeTab === 'private' && privateChats.length > 0) {
+      loadPrivateChats();
+    }
+  }, [userPresence, activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Request presence data when switching to private tab
+  useEffect(() => {
+    if (activeTab === 'private') {
+      (async () => {
+        try {
+          const sock = await getSocket();
+          sock.emit('presence:request_bulk');
+        } catch (error) {
+          console.error('Failed to request presence data:', error);
+        }
+      })();
+    }
+  }, [activeTab]);
+
+  const handleCreateGroup = useCallback(async () => {
+    if (!canManage) return Alert.alert('Forbidden', 'Only admins can create groups.');
+    const name = newGroupName.trim();
+    const description = newGroupDesc.trim();
+    if (!name) return Alert.alert('Validation', 'Please enter a group name.');
+    try {
+      setCreating(true);
+      await createGroup({ name, description });
+      setNewGroupName('');
+      setNewGroupDesc('');
+      setShowCreateGroup(false);
+      await loadGroups(); // immediate refresh
+      Alert.alert('Success', 'Group created.');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to create group.');
+    } finally {
+      setCreating(false);
+    }
+  }, [canManage, newGroupName, newGroupDesc, loadGroups]);
+
+  const renderTabs = () => (
+    <View style={styles.tabContainer}>
+      <TouchableOpacity 
+        style={[styles.tab, activeTab === 'groups' && styles.activeTab]}
+        onPress={() => setActiveTab('groups')}
       >
-        <Text style={styles.visibilityText}>
-          {getVisibilityLabel(order.visibilityState, order.remainingTime)}
+        <Users size={20} color={activeTab === 'groups' ? '#3B82F6' : '#6B7280'} />
+        <Text style={[styles.tabText, activeTab === 'groups' && styles.activeTabText]}>
+          Groups
         </Text>
-      </Animated.View>
-    );
-  };
+      </TouchableOpacity>
+      <TouchableOpacity 
+        style={[styles.tab, activeTab === 'private' && styles.activeTab]}
+        onPress={() => setActiveTab('private')}
+      >
+        <MessageCircle size={20} color={activeTab === 'private' ? '#3B82F6' : '#6B7280'} />
+        <Text style={[styles.tabText, activeTab === 'private' && styles.activeTabText]}>
+          Private
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
 
-  const renderOrderItem = (order: PassengerOrder) => {
-    const isLoading = loadingAction === order.id;
-    const isProcessed = order.status !== 'pending';
-
-    return (
-      <View key={order.id} style={[styles.orderCard, isProcessed && styles.processedCard]}>
-        {/* Visibility Badge */}
-        <VisibilityBadge order={order} />
-
-        {/* Passenger Info */}
-        <View style={styles.passengerInfo}>
-          <View style={styles.passengerHeader}>
-            <Text style={styles.passengerName}>{order.passengerName}</Text>
-            <View style={styles.ratingContainer}>
-              <View style={styles.stars}>
-                {renderStars(order.passengerRating)}
-              </View>
-              <Text style={styles.ratingText}>{order.passengerRating}</Text>
-            </View>
-          </View>
-          <Text style={styles.timestamp}>{order.timestamp}</Text>
-        </View>
-
-        {/* Route Information */}
-        <View style={styles.routeContainer}>
-          <View style={styles.routePoint}>
-            <View style={[styles.routeDot, { backgroundColor: '#10B981' }]} />
-            <View style={styles.routeDetails}>
-              <Text style={styles.routeLabel}>Pickup</Text>
-              <Text style={styles.routeAddress}>{order.pickupLocation}</Text>
-            </View>
-          </View>
-          
-          <View style={styles.routeLine} />
-          
-          <View style={styles.routePoint}>
-            <View style={[styles.routeDot, { backgroundColor: '#EF4444' }]} />
-            <View style={styles.routeDetails}>
-              <Text style={styles.routeLabel}>Destination</Text>
-              <Text style={styles.routeAddress}>{order.destination}</Text>
-            </View>
-          </View>
-        </View>
-
-        {/* Trip Details */}
-        {/* <View style={styles.tripDetails}>
-          <View style={styles.detailItem}>
-            <Navigation size={16} color="#6B7280" />
-            <Text style={styles.detailText}>{order.distance}</Text>
-          </View>
-          <View style={styles.detailItem}>
-            <Clock size={16} color="#6B7280" />
-            <Text style={styles.detailText}>{order.estimatedDuration}</Text>
-          </View>
-          <View style={styles.detailItem}>
-            <DollarSign size={16} color="#10B981" />
-            <Text style={[styles.detailText, styles.fareText]}>{order.fareAmount.toLocaleString()} MMK</Text>
-          </View>
-        </View> */}
-
-        {/* Action Buttons */}
-        {!isProcessed && (
-          <View style={styles.actionButtons}>
-            <TouchableOpacity
-              style={[styles.actionButton, styles.sendToGroupButton]}
-              onPress={() => handleAction(order.id, 'send_to_group')}
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <ActivityIndicator size="small" color="white" />
-              ) : (
-                <>
-                  <Users size={16} color="white" />
-                  <Text style={styles.buttonText}>Send to Group</Text>
-                </>
-              )}
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.actionButton, styles.declineButton]}
-              onPress={() => handleAction(order.id, 'decline')}
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <ActivityIndicator size="small" color="white" />
-              ) : (
-                <>
-                  <X size={16} color="white" />
-                  <Text style={styles.buttonText}>Decline</Text>
-                </>
-              )}
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.actionButton, styles.acceptButton]}
-              onPress={() => handleAction(order.id, 'accept')}
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <ActivityIndicator size="small" color="white" />
-              ) : (
-                <>
-                  <Check size={16} color="white" />
-                  <Text style={styles.buttonText}>Accept</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* Status Indicator */}
-        {isProcessed && (
-          <View style={styles.statusContainer}>
-            {/* Call Button for Accepted Orders */}
-            {order.status === 'accepted' && (
-              <TouchableOpacity 
-                style={[styles.actionButton, styles.callButton]}
-                onPress={() => handleCallPassenger(order.passengerPhone)}
-              >
-                <Phone size={16} color="white" />
-                <Text style={styles.callButtonText}>Call Passenger</Text>
-              </TouchableOpacity>
-            )}
-            
-            <View style={[
-              styles.statusBadge,
-              order.status === 'accepted' && styles.acceptedStatus,
-              order.status === 'declined' && styles.declinedStatus,
-              order.status === 'sent_to_group' && styles.sentToGroupStatus,
-            ]}>
-              <Text style={styles.statusText}>
-                {order.status === 'accepted' && 'Accepted'}
-                {order.status === 'declined' && 'Declined'}
-                {order.status === 'sent_to_group' && 'Sent to Group'}
-              </Text>
-            </View>
-          </View>
+  const renderGroupList = () => (
+    <View style={styles.groupList}>
+      <View style={styles.groupListHeader}>
+        <Text style={styles.groupListTitle}>Driver Groups</Text>
+        {canManage && (
+          <TouchableOpacity style={styles.addGroupButton} onPress={() => setShowCreateGroup(true)}>
+            <Plus size={20} color="#3B82F6" />
+          </TouchableOpacity>
         )}
       </View>
-    );
-  };
+
+      {loading ? (
+        <View style={{ padding: 20 }}>
+          <Text style={{ color: '#6B7280' }}>Loading…</Text>
+        </View>
+      ) : groups.length === 0 ? (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}   // ⬅️ NEW
+          contentContainerStyle={{ padding: 20 }}
+        >
+          <Text style={{ color: '#6B7280' }}>No groups yet.</Text>
+        </ScrollView>
+      ) : (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}   // ⬅️ NEW
+        >
+          {groups.map((group) => (
+            <TouchableOpacity
+              key={group.id}
+              style={styles.groupItem}
+              onPress={() => {
+                // Navigate immediately for smooth transition
+                router.push({ pathname: '/[id]', params: { id: group.id, name: group.name } });
+              }}
+              activeOpacity={0.7}
+            >
+              <View style={styles.groupAvatar}>
+                <Users size={24} color="#6B7280" />
+              </View>
+              <View style={styles.groupInfo}>
+                <View style={styles.groupHeader}>
+                  <Text style={styles.groupName}>{group.name}</Text>
+                  <Text style={styles.groupTime}>{group.lastMessageTime}</Text>
+                </View>
+                <View style={styles.groupFooter}>
+                  <Text style={styles.groupLastMessage} numberOfLines={1}>
+                    {group.lastMessage}
+                  </Text>
+                  <Text style={styles.groupMembers}>{group.memberCount} members</Text>
+                </View>
+              </View>
+              {group.unreadCount > 0 && (
+                <View style={styles.unreadBadge}>
+                  <Text style={styles.unreadCount}>{group.unreadCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
+    </View>
+  );
+
+  const renderPrivateList = () => (
+    <View style={styles.groupList}>
+      <View style={styles.groupListHeader}>
+        <Text style={styles.groupListTitle}>Private Chats</Text>
+      </View>
+
+      {loading ? (
+        <View style={{ padding: 20 }}>
+          <Text style={{ color: '#6B7280' }}>Loading…</Text>
+        </View>
+      ) : privateChats.length === 0 ? (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          contentContainerStyle={{ padding: 20 }}
+        >
+          <Text style={{ color: '#6B7280' }}>No private conversations yet.</Text>
+        </ScrollView>
+      ) : (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        >
+          {privateChats.map((chat) => (
+            <TouchableOpacity
+              key={chat.id}
+              style={styles.groupItem}
+              onPress={() => {
+                // Navigate immediately for smooth transition
+                router.push({ pathname: '/[id]', params: { id: chat.id, name: chat.name } });
+              }}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.groupAvatar, { backgroundColor: chat.isOnline ? '#10B981' : '#F3F4F6' }]}>
+                <MessageCircle size={24} color={chat.isOnline ? 'white' : '#6B7280'} />
+              </View>
+              <View style={styles.groupInfo}>
+                <View style={styles.groupHeader}>
+                  <Text style={styles.groupName}>{chat.name}</Text>
+                  <Text style={styles.groupTime}>{chat.lastMessageTime}</Text>
+                </View>
+                <View style={styles.groupFooter}>
+                  <Text style={styles.groupLastMessage} numberOfLines={1}>
+                    {chat.lastMessage}
+                  </Text>
+                  <Text style={styles.groupMembers}>
+                    {chat.isOnline ? 'Online' : 'Offline'}
+                  </Text>
+                </View>
+              </View>
+              {chat.unreadCount > 0 && (
+                <View style={styles.unreadBadge}>
+                  <Text style={styles.unreadCount}>{chat.unreadCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      )}
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Live Driver Orders</Text>
-        <View style={styles.headerStats}>
-          <Text style={styles.headerSubtitle}>
-            {orders.filter(o => o.status === 'pending').length} active orders
-          </Text>
-          <View style={styles.liveIndicator}>
-            <View style={styles.liveDot} />
-            <Text style={styles.liveText}>LIVE</Text>
-          </View>
-        </View>
-      </View>
+      {renderTabs()}
+      {activeTab === 'groups' ? renderGroupList() : renderPrivateList()}
 
-      <ScrollView
-        style={styles.content}
-        showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
-      >
-        {orders.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>Waiting for new orders...</Text>
-            <Text style={styles.emptySubtext}>Orders will appear automatically</Text>
-          </View>
-        ) : (
-          orders.map(renderOrderItem)
-        )}
-      </ScrollView>
-
-      {/* Confirmation Modal */}
-      <Modal
-        visible={confirmationModal.visible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setConfirmationModal({ ...confirmationModal, visible: false })}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Confirm Action</Text>
-              <TouchableOpacity
-                onPress={() => setConfirmationModal({ ...confirmationModal, visible: false })}
-                style={styles.modalCloseButton}
-              >
-                <X size={24} color="#6B7280" />
-              </TouchableOpacity>
-            </View>
-
-            {confirmationModal.orderDetails && (
-              <View style={styles.modalBody}>
-                <Text style={styles.modalText}>
-                  Are you sure you want to{' '}
-                  <Text style={styles.modalActionText}>
-                    {confirmationModal.action === 'accept' && 'accept'}
-                    {confirmationModal.action === 'decline' && 'decline'}
-                    {confirmationModal.action === 'send_to_group' && 'send to group'}
-                  </Text>{' '}
-                  this order?
-                </Text>
-
-                <View style={styles.modalOrderInfo}>
-                  <Text style={styles.modalOrderText}>
-                    Passenger: {confirmationModal.orderDetails.passengerName}
-                  </Text>
-                  <Text style={styles.modalOrderText}>
-                    Fare: {confirmationModal.orderDetails.fareAmount.toLocaleString()} MMK
-                  </Text>
-                  <Text style={styles.modalOrderText}>
-                    Distance: {confirmationModal.orderDetails.distance}
-                  </Text>
-                </View>
-
-                <View style={styles.modalActions}>
-                  <TouchableOpacity
-                    style={styles.modalCancelButton}
-                    onPress={() => setConfirmationModal({ ...confirmationModal, visible: false })}
-                  >
-                    <Text style={styles.modalCancelText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.modalConfirmButton}
-                    onPress={confirmAction}
-                  >
-                    <Text style={styles.modalConfirmText}>Confirm</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
-          </View>
-        </View>
-      </Modal>
+      <CreateGroupModal
+        visible={canManage && showCreateGroup}
+        canManage={canManage}
+        creating={creating}
+        groupName={newGroupName}
+        groupDesc={newGroupDesc}
+        onChangeGroupName={setNewGroupName}
+        onChangeGroupDesc={setNewGroupDesc}
+        onClose={() => setShowCreateGroup(false)}
+        onCreate={handleCreateGroup}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F9FAFB',
+  container: { flex: 1, backgroundColor: '#F9FAFB' },
+  
+  // Tab styles
+  tabContainer: { 
+    flexDirection: 'row', 
+    backgroundColor: 'white', 
+    borderBottomWidth: 1, 
+    borderBottomColor: '#E5E7EB' 
   },
-  header: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: 'white',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
+  tab: { 
+    flex: 1, 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    justifyContent: 'center', 
+    paddingVertical: 16, 
+    gap: 8 
   },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#1F2937',
-    marginBottom: 8,
+  activeTab: { borderBottomWidth: 2, borderBottomColor: '#3B82F6' },
+  tabText: { fontSize: 16, fontWeight: '600', color: '#6B7280' },
+  activeTabText: { color: '#3B82F6' },
+  
+  groupList: { flex: 1 },
+  groupListHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingVertical: 16, backgroundColor: 'white', borderBottomWidth: 1, borderBottomColor: '#E5E7EB',
   },
-  headerStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  groupListTitle: { fontSize: 24, fontWeight: 'bold', color: '#1F2937' },
+  addGroupButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#EBF4FF', alignItems: 'center', justifyContent: 'center' },
+
+  groupItem: {
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 16, backgroundColor: 'white',
+    borderBottomWidth: 1, borderBottomColor: '#F3F4F6',
   },
-  headerSubtitle: {
-    fontSize: 14,
-    color: '#6B7280',
-  },
-  liveIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEE2E2',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#EF4444',
-    marginRight: 4,
-  },
-  liveText: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: '#EF4444',
-  },
-  content: {
-    flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 16,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 60,
-  },
-  emptyText: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#6B7280',
-    marginBottom: 8,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  orderCard: {
-    backgroundColor: 'white',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 3,
-    position: 'relative',
-  },
-  processedCard: {
-    opacity: 0.7,
-  },
-  visibilityBadge: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderTopRightRadius: 16,
-    borderBottomLeftRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 4,
-  },
-  visibilityText: {
-    color: 'white',
-    fontSize: 12,
-    fontWeight: '700',
-    textShadowColor: 'rgba(0, 0, 0, 0.3)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
-  },
-  passengerInfo: {
-    marginBottom: 16,
-    paddingRight: 120,
-  },
-  passengerHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  passengerName: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#1F2937',
-  },
-  ratingContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  stars: {
-    flexDirection: 'row',
-    marginRight: 4,
-  },
-  ratingText: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontWeight: '500',
-  },
-  timestamp: {
-    fontSize: 14,
-    color: '#6B7280',
-  },
-  routeContainer: {
-    marginBottom: 16,
-  },
-  routePoint: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  routeDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginRight: 12,
-    marginTop: 4,
-  },
-  routeDetails: {
-    flex: 1,
-  },
-  routeLabel: {
-    fontSize: 12,
-    color: '#6B7280',
-    fontWeight: '500',
-    marginBottom: 2,
-  },
-  routeAddress: {
-    fontSize: 14,
-    color: '#374151',
-    lineHeight: 20,
-  },
-  routeLine: {
-    width: 2,
-    height: 16,
-    backgroundColor: '#D1D5DB',
-    marginLeft: 5,
-    marginVertical: -4,
-  },
-  tripDetails: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#F9FAFB',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
-  },
-  detailItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  detailText: {
-    fontSize: 14,
-    color: '#374151',
-    marginLeft: 6,
-    fontWeight: '500',
-  },
-  fareText: {
-    color: '#10B981',
-    fontWeight: '600',
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  actionButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 8,
-    gap: 6,
-  },
-  sendToGroupButton: {
-    backgroundColor: '#3B82F6',
-  },
-  declineButton: {
-    backgroundColor: '#EF4444',
-  },
-  acceptButton: {
-    backgroundColor: '#10B981',
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  statusContainer: {
-    alignItems: 'center',
-    marginTop: 12,
-    gap: 8,
-  },
-  callButton: {
-    backgroundColor: '#10B981',
-  },
-  callButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  statusBadge: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  acceptedStatus: {
-    backgroundColor: '#D1FAE5',
-  },
-  declinedStatus: {
-    backgroundColor: '#FEE2E2',
-  },
-  sentToGroupStatus: {
-    backgroundColor: '#DBEAFE',
-  },
-  statusText: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  modalContent: {
-    backgroundColor: 'white',
-    borderRadius: 16,
-    width: '100%',
-    maxWidth: 400,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#1F2937',
-  },
-  modalCloseButton: {
-    padding: 4,
-  },
-  modalBody: {
-    padding: 20,
-  },
-  modalText: {
-    fontSize: 16,
-    color: '#374151',
-    marginBottom: 16,
-    textAlign: 'center',
-  },
-  modalActionText: {
-    fontWeight: '600',
-    color: '#3B82F6',
-  },
-  modalOrderInfo: {
-    backgroundColor: '#F9FAFB',
-    padding: 16,
-    borderRadius: 8,
-    marginBottom: 20,
-  },
-  modalOrderText: {
-    fontSize: 14,
-    color: '#374151',
-    marginBottom: 4,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  modalCancelButton: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-  },
-  modalCancelText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#6B7280',
-  },
-  modalConfirmButton: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 8,
-    backgroundColor: '#3B82F6',
-    alignItems: 'center',
-  },
-  modalConfirmText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
+  groupAvatar: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  groupInfo: { flex: 1 },
+  groupHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  groupName: { fontSize: 16, fontWeight: '600', color: '#1F2937' },
+  groupTime: { fontSize: 12, color: '#6B7280' },
+  groupFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  groupLastMessage: { fontSize: 14, color: '#6B7280', flex: 1, marginRight: 8 },
+  groupMembers: { fontSize: 12, color: '#9CA3AF' },
+  unreadBadge: { backgroundColor: '#EF4444', borderRadius: 10, minWidth: 20, height: 20, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+  unreadCount: { color: 'white', fontSize: 12, fontWeight: '600' },
+
+  // Modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalContainer: { backgroundColor: 'white', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '90%' },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: '#E5E7EB' },
+  modalTitle: { fontSize: 18, fontWeight: '600', color: '#1F2937' },
+  modalClose: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  modalBody: { paddingHorizontal: 20, paddingVertical: 16 },
+  formLabel: { fontSize: 14, fontWeight: '500', color: '#374151', marginBottom: 6 },
+  formInput: { borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16, color: '#1F2937' },
+  textArea: { height: 80, textAlignVertical: 'top' },
+  modalActions: { flexDirection: 'row', paddingHorizontal: 20, paddingVertical: 16, borderTopWidth: 1, borderTopColor: '#E5E7EB', gap: 12 },
+  modalCancel: { flex: 1, paddingVertical: 12, borderRadius: 8, backgroundColor: '#F3F4F6', alignItems: 'center' },
+  modalCancelText: { fontSize: 16, fontWeight: '600', color: '#6B7280' },
+  modalSubmit: { flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: 8, backgroundColor: '#3B82F6', gap: 6 },
+  modalSubmitText: { fontSize: 16, fontWeight: '600', color: 'white' },
 });

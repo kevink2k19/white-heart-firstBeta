@@ -1,0 +1,247 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  MODERATOR
+  USER
+}
+
+enum Status {
+  ACTIVE
+  NORMAL
+  WARNING
+  BANNED
+}
+
+/// NEW: status for top-ups
+enum TopUpStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id            String   @id @default(cuid())
+  phone         String   @unique
+  name          String
+  passwordHash  String
+  licenseNumber String?
+  carNumber     String?
+  balance       Int      @default(0)
+  role          Role     @default(USER)
+  rating        Int      @default(10)
+  status        Status   @default(NORMAL)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // NEW: relations
+  paymentMethodsCreated PaymentMethod[] // user created these payment methods
+  topUps                TopUp[] // user submitted these top-ups
+  decidedTopUps         TopUp[]                   @relation("TopUpDecider") // user moderated these top-ups
+  conversations         ConversationParticipant[]
+  messages              Message[]
+  messageStatuses       MessageStatus[]
+  voiceParticipants     VoiceParticipant[]
+  voiceTransmissions    VoiceTransmission[]
+  voicePlaybacks        VoiceTransmissionPlayback[]
+}
+
+model PaymentMethod {
+  id         String  @id @default(cuid())
+  name       String
+  bank       String
+  number     String
+  numberNorm String
+  isActive   Boolean @default(true)
+
+  createdById String
+  createdBy   User   @relation(fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 🔁 Back-relation to TopUp
+  topUps TopUp[] @relation("PaymentMethodTopUps")
+
+  @@unique([bank, numberNorm])
+  @@index([isActive])
+}
+
+model TopUp {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  amount    Int
+  paymentId String
+
+  paymentMethodId String
+  // 🔁 Named relation to match the back-relation
+  paymentMethod   PaymentMethod @relation("PaymentMethodTopUps", fields: [paymentMethodId], references: [id])
+
+  status    TopUpStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+
+  decidedAt   DateTime?
+  decidedById String?
+  decidedBy   User?     @relation("TopUpDecider", fields: [decidedById], references: [id])
+
+  @@index([status, createdAt])
+}
+
+/// ====== ADD: Messaging enums ======
+enum ConversationType {
+  GROUP
+  DM
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VOICE
+  ORDER
+  SYSTEM
+  LOCATION
+}
+
+/// ====== OPTIONAL: add virtual back-relations on User (no DB columns) ======
+/// Add these lines inside your existing `model User { ... }`
+/// (they don't change your DB schema; they make Prisma relations nice to use)
+//
+//  conversations       ConversationParticipant[]
+//  messages            Message[]
+//  messageStatuses     MessageStatus[]
+//  voiceParticipants   VoiceParticipant[]
+//
+
+/// ====== ADD: Messaging models ======
+model Conversation {
+  id           String                    @id @default(cuid())
+  type         ConversationType
+  title        String? // group name (null for DM)
+  description  String?
+  createdAt    DateTime                  @default(now())
+  participants ConversationParticipant[]
+  messages     Message[]
+  voiceRooms   VoiceRoom[]
+
+  @@index([type, createdAt])
+}
+
+model ConversationParticipant {
+  id             String       @id @default(cuid())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+  role           String       @default("member") // admin|moderator|member
+  joinedAt       DateTime     @default(now())
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String          @id @default(cuid())
+  conversation   Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+  sender         User?           @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  senderId       String?
+  type           MessageType
+  text           String?
+  orderPayload   Json?
+  mediaUrl       String?
+  mediaKind      String? // "image" | "audio"
+  mediaDurationS Int?
+  latitude       Float?
+  longitude      Float?
+  locationAddress String?
+  createdAt      DateTime        @default(now())
+  statuses       MessageStatus[]
+
+  @@index([conversationId, createdAt])
+}
+
+model MessageStatus {
+  id          String    @id @default(cuid())
+  message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId   String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  deliveredAt DateTime?
+  readAt      DateTime?
+  hiddenAt    DateTime? // NEW: when user hid this message for themselves
+
+  @@unique([messageId, userId])
+  @@index([userId, readAt, deliveredAt])
+}
+
+/// ====== (Optional) “podcast / walkie-talkie” live room tracking ======
+model VoiceRoom {
+  id             String             @id @default(cuid())
+  conversation   Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+  isLive         Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  endedAt        DateTime?
+  participants   VoiceParticipant[]
+  transmissions  VoiceTransmission[]
+
+  @@unique([conversationId]) // One voice room per conversation
+  @@index([conversationId, isLive])
+}
+
+model VoiceParticipant {
+  id         String    @id @default(cuid())
+  room       VoiceRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roomId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  muted      Boolean   @default(false)
+  isListening Boolean  @default(true) // NEW: whether user is actively listening
+  joinedAt   DateTime  @default(now())
+  leftAt     DateTime?
+  lastSeenAt DateTime  @default(now()) // NEW: for tracking online status
+
+  @@unique([roomId, userId])
+  @@index([roomId, userId, isListening])
+}
+
+/// NEW: Voice Transmissions for walkie-talkie feature
+model VoiceTransmission {
+  id         String    @id @default(cuid())
+  room       VoiceRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roomId     String
+  sender     User      @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  senderId   String
+  audioUrl   String    // URL to the voice recording
+  durationS  Int?      // Duration in seconds
+  createdAt  DateTime  @default(now())
+  
+  // Track who has heard this transmission
+  playbacks  VoiceTransmissionPlayback[]
+
+  @@index([roomId, createdAt])
+  @@index([senderId, createdAt])
+}
+
+/// NEW: Track which users have played/heard voice transmissions
+model VoiceTransmissionPlayback {
+  id             String            @id @default(cuid())
+  transmission   VoiceTransmission @relation(fields: [transmissionId], references: [id], onDelete: Cascade)
+  transmissionId String
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+  playedAt       DateTime          @default(now())
+  
+  @@unique([transmissionId, userId])
+  @@index([userId, playedAt])
+}

@@ -1,4 +1,5 @@
 // app.config.js
+import 'dotenv/config';
 export default {
   expo: {
     name: process.env.NODE_ENV === 'production' ? 'White Heart' : 'White Heart (Dev)',
@@ -18,12 +19,15 @@ export default {
       buildNumber: '1',
       infoPlist: {
         NSLocationWhenInUseUsageDescription: 'We use your location for navigation.',
+        NSMicrophoneUsageDescription: 'We use your microphone for voice messages and walkie-talkie functionality.',
+        // Background audio for voice transmission playback
+        UIBackgroundModes: ['audio'],
         // Uncomment if you need background tracking on iOS:
         // NSLocationAlwaysAndWhenInUseUsageDescription: 'We use your location to track trips even in the background.',
-        // UIBackgroundModes: ['location'],
+        // UIBackgroundModes: ['location', 'audio'],
       },
       // Only needed if you render Google maps on iOS (not required for Apple Maps):
-      config: { googleMapsApiKey: process.env.IOS_GOOGLE_MAPS_API_KEY }
+      config: { googleMapsApiKey: 'AIzaSyBtinZ-NpA8cvnCJQKZ7NJwKl6QkV4o_Qg' }
     },
 
     android: {
@@ -40,11 +44,14 @@ export default {
         'RECORD_AUDIO',
         'CALL_PHONE',
         'INTERNET',
-        'ACCESS_NETWORK_STATE'
+        'ACCESS_NETWORK_STATE',
+        // Background audio for voice transmission
+        'WAKE_LOCK',
+        'FOREGROUND_SERVICE'
       ],
       // Native Maps SDK key (DO NOT hard-code; supply via EAS secret)
       config: {
-        googleMaps: { apiKey: process.env.ANDROID_GOOGLE_MAPS_API_KEY }
+        googleMaps: { apiKey: 'AIzaSyBtinZ-NpA8cvnCJQKZ7NJwKl6QkV4o_Qg'}
       }
     },
 
@@ -55,7 +62,9 @@ export default {
       'expo-font',
       'expo-web-browser',
       'expo-location',
+      "expo-secure-store",
       ['expo-camera', { cameraPermission: 'Allow White Heart to access your camera to take profile photos.' }],
+      
     ],
 
     experiments: { typedRoutes: true },

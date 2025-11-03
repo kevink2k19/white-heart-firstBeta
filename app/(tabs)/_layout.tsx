@@ -24,7 +24,7 @@ export default function TabLayout() {
           fontWeight: '600',
         },
       }}>
-      <Tabs.Screen
+      {/* <Tabs.Screen
         name="index"
         options={{
           title: 'Orders',
@@ -32,9 +32,9 @@ export default function TabLayout() {
             <ClipboardList size={size} color={color} />
           ),
         }}
-      />
+      /> */}
       <Tabs.Screen
-        name="messaging"
+        name="index"
         options={{
           title: 'Messages',
           tabBarIcon: ({ size, color }) => (

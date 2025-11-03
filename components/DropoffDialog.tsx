@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,281 +8,195 @@ import {
   TouchableWithoutFeedback,
   Animated,
   Dimensions,
-  ScrollView,
+  Platform,
 } from 'react-native';
-import { X, MapPin, Clock, DollarSign, Navigation, Zap, Calendar, CircleCheck as CheckCircle } from 'lucide-react-native';
+import { X, CheckCircle } from 'lucide-react-native';
+import MapView, { Polyline, Marker, PROVIDER_GOOGLE, LatLng } from 'react-native-maps';
 
-const { width, height } = Dimensions.get('window');
+const { height } = Dimensions.get('window');
 
 interface TripDetails {
-  distance: number;
-  duration: string;
-  speed: number;
-  totalCost: number;
-  startTime: string;
-  endTime: string;
-  pickupLocation?: string;
-  dropoffLocation?: string;
-  customerName?: string;
-  customerPhone?: string;
-  orderId?: string;
+  distance: number;      // km
+  duration: string;      // "23 minutes"
+  totalCost: number;     // MMK
+  startTime: string;     // "14:03"
+  endTime: string;       // "14:42"
 }
 
 interface DropoffDialogProps {
   visible: boolean;
   onClose: () => void;
   onConfirm: () => void;
+
   tripDetails: TripDetails;
+
+  driverName: string;
+  carNumber?: string;
+
+  routeCoords?: LatLng[];
+  origin?: LatLng | null;
+  dest?: LatLng | null;
 }
 
-export default function DropoffDialog({ 
-  visible, 
-  onClose, 
-  onConfirm, 
-  tripDetails 
+export default function DropoffDialog({
+  visible,
+  onClose,
+  onConfirm,
+  tripDetails,
+  driverName,
+  carNumber,
+  routeCoords = [],
+  origin = null,
+  dest = null,
 }: DropoffDialogProps) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const scaleAnim = useRef(new Animated.Value(0.8)).current;
+  const scaleAnim = useRef(new Animated.Value(0.9)).current;
+
+  const mapRef = useRef<MapView | null>(null);
+
+  // fallback markers if not provided
+  const startMarker = origin ?? (routeCoords.length > 0 ? routeCoords[0] : null);
+  const endMarker = dest ?? (routeCoords.length > 1 ? routeCoords[routeCoords.length - 1] : null);
 
   useEffect(() => {
     if (visible) {
-      // Prevent background scrolling
       Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.spring(scaleAnim, {
-          toValue: 1,
-          tension: 100,
-          friction: 8,
-          useNativeDriver: true,
-        }),
+        Animated.timing(fadeAnim, { toValue: 1, duration: 220, useNativeDriver: true }),
+        Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true }),
       ]).start();
     } else {
       Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 0,
-          duration: 200,
-          useNativeDriver: true,
-        }),
-        Animated.timing(scaleAnim, {
-          toValue: 0.8,
-          duration: 200,
-          useNativeDriver: true,
-        }),
+        Animated.timing(fadeAnim, { toValue: 0, duration: 160, useNativeDriver: true }),
+        Animated.timing(scaleAnim, { toValue: 0.9, duration: 160, useNativeDriver: true }),
       ]).start();
     }
   }, [visible]);
 
-  const handleBackdropPress = () => {
-    onClose();
-  };
-
   const handleConfirm = () => {
-    // Call the onConfirm callback to update order status
     onConfirm();
     onClose();
   };
 
-  const formatCurrency = (amount: number) => {
-    return `${amount.toLocaleString()} MMK`;
-  };
+  const formatCurrency = (amount: number) => `${amount.toLocaleString()} MMK`;
+
+  const fitMapToRoute = useCallback(() => {
+    if (!mapRef.current || routeCoords.length < 2) return;
+    try {
+      mapRef.current.fitToCoordinates(routeCoords, {
+        edgePadding: { top: 32, right: 32, bottom: 32, left: 32 },
+        animated: false,
+      });
+    } catch {}
+  }, [routeCoords]);
+
+  // Fit once the modal becomes visible and whenever route changes
+  useEffect(() => {
+    if (!visible) return;
+    const id = setTimeout(fitMapToRoute, 100); // slight delay to ensure layout ready
+    return () => clearTimeout(id);
+  }, [visible, routeCoords, fitMapToRoute]);
+
+  // Center to a reasonable initial region (will be overridden by fit)
+  const midRegion =
+    routeCoords.length > 0
+      ? {
+          latitude: routeCoords[Math.floor(routeCoords.length / 2)].latitude,
+          longitude: routeCoords[Math.floor(routeCoords.length / 2)].longitude,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05,
+        }
+      : undefined;
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="none"
-      statusBarTranslucent
-      onRequestClose={onClose}
-    >
-      <TouchableWithoutFeedback onPress={handleBackdropPress}>
-        <Animated.View 
-          style={[
-            styles.overlay,
-            {
-              opacity: fadeAnim,
-            }
-          ]}
-        >
+    <Modal visible={visible} transparent animationType="none" statusBarTranslucent onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={onClose}>
+        <Animated.View style={[styles.overlay, { opacity: fadeAnim }]}>
           <TouchableWithoutFeedback onPress={() => {}}>
-            <Animated.View
-              style={[
-                styles.dialogContainer,
-                {
-                  transform: [
-                    { scale: scaleAnim },
-                    { translateY: fadeAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [50, 0],
-                    })},
-                  ],
-                }
-              ]}
-            >
+            <Animated.View style={[styles.dialogContainer, { transform: [{ scale: scaleAnim }] }]}>
               {/* Header */}
               <View style={styles.header}>
                 <View style={styles.headerIcon}>
                   <CheckCircle size={28} color="#10B981" />
                 </View>
                 <Text style={styles.headerTitle}>Complete Trip</Text>
-                <TouchableOpacity 
-                  style={styles.closeButton}
-                  onPress={onClose}
-                  accessibilityLabel="Close dialog"
-                  accessibilityRole="button"
-                >
+                <TouchableOpacity style={styles.closeButton} onPress={onClose}>
                   <X size={24} color="#6B7280" />
                 </TouchableOpacity>
               </View>
 
-              {/* Content */}
-              <ScrollView 
-                style={styles.content}
-                showsVerticalScrollIndicator={false}
-              >
-                {/* Price Section */}
-               <View style={styles.priceSection}>
-                  {tripDetails.customerName && (
-                    <Text style={styles.customerInfoText}>Customer: {tripDetails.customerName}</Text>
-                  )}
-                  {tripDetails.orderId && (
-                    <Text style={styles.orderIdText}>Order ID: {tripDetails.orderId}</Text>
-                  )}
-                  <Text style={styles.priceLabel}>Total Fare</Text>
-                  <Text style={styles.priceAmount}>
-                    {formatCurrency(tripDetails.totalCost)}
-                  </Text>
-                  <Text style={styles.priceSubtext}>
-                    Distance: {tripDetails.distance.toFixed(2)} km
-                  </Text>
-                  <Text style={styles.modalOrderText}>
-                    {Math.round((tripDetails.totalCost - 2000)).toLocaleString()} MMK
+              {/* TOP rows */}
+              <View style={styles.topBox}>
+                {/* Driver + Car */}
+                <View style={styles.topRow}>
+                  <Text style={styles.topLabel}>Driver</Text>
+                  <Text style={styles.topValue}>
+                    {driverName}
+                    {carNumber ? `  •  ${carNumber}` : ''}
                   </Text>
                 </View>
 
-                {/* Trip Details */}
-                <View style={styles.detailsSection}>
-                  <Text style={styles.sectionTitle}>Trip Summary</Text>
-                  
-                  <View style={styles.detailRow}>
-                    <View style={styles.detailIcon}>
-                      <Navigation size={20} color="#3B82F6" />
-                    </View>
-                    <View style={styles.detailContent}>
-                      <Text style={styles.detailLabel}>Distance Traveled</Text>
-                      <Text style={styles.detailValue}>{tripDetails.distance.toFixed(2)} km</Text>
-                    </View>
+                {/* Fare + Distance */}
+                <View style={[styles.topRow, styles.twoCols]}>
+                  <View style={styles.col}>
+                    <Text style={styles.topLabel}>Fare</Text>
+                    <Text style={[styles.topValue, styles.fareValue]}>{formatCurrency(tripDetails.totalCost)}</Text>
                   </View>
-
-                  <View style={styles.detailRow}>
-                    <View style={styles.detailIcon}>
-                      <Clock size={20} color="#F59E0B" />
-                    </View>
-                    <View style={styles.detailContent}>
-                      <Text style={styles.detailLabel}>Trip Duration</Text>
-                      <Text style={styles.detailValue}>{tripDetails.duration}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.detailRow}>
-                    <View style={styles.detailIcon}>
-                      <Zap size={20} color="#8B5CF6" />
-                    </View>
-                    <View style={styles.detailContent}>
-                      <Text style={styles.detailLabel}>Average Speed</Text>
-                      <Text style={styles.detailValue}>{Math.round(tripDetails.speed)} km/h</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.detailRow}>
-                    <View style={styles.detailIcon}>
-                      <Calendar size={20} color="#EF4444" />
-                    </View>
-                    <View style={styles.detailContent}>
-                      <Text style={styles.detailLabel}>Trip Time</Text>
-                      <Text style={styles.detailValue}>
-                        {tripDetails.startTime} - {tripDetails.endTime}
-                      </Text>
-                    </View>
+                  <View style={styles.col}>
+                    <Text style={styles.topLabel}>Total Distance</Text>
+                    <Text style={styles.topValue}>{tripDetails.distance.toFixed(2)} km</Text>
                   </View>
                 </View>
 
-                {/* Location Details */}
-                {(tripDetails.pickupLocation || tripDetails.dropoffLocation) && (
-                  <View style={styles.locationSection}>
-                    <Text style={styles.sectionTitle}>Route Details</Text>
-                    
-                    {tripDetails.pickupLocation && (
-                      <View style={styles.locationRow}>
-                        <View style={[styles.locationDot, { backgroundColor: '#10B981' }]} />
-                        <View style={styles.locationContent}>
-                          <Text style={styles.locationLabel}>Pickup</Text>
-                          <Text style={styles.locationAddress}>{tripDetails.pickupLocation}</Text>
-                        </View>
-                      </View>
-                    )}
+                {/* Time + Duration */}
+                <View style={[styles.topRow, styles.twoCols]}>
+                  <View style={styles.col}>
+                    <Text style={styles.topLabel}>Trip Time</Text>
+                    <Text style={styles.topValue}>
+                      {tripDetails.startTime} - {tripDetails.endTime}
+                    </Text>
+                  </View>
+                  <View style={styles.col}>
+                    <Text style={styles.topLabel}>Trip Duration</Text>
+                    <Text style={styles.topValue}>{tripDetails.duration}</Text>
+                  </View>
+                </View>
+              </View>
 
-                    {tripDetails.dropoffLocation && (
-                      <View style={styles.locationRow}>
-                        <View style={[styles.locationDot, { backgroundColor: '#EF4444' }]} />
-                        <View style={styles.locationContent}>
-                          <Text style={styles.locationLabel}>Drop-off</Text>
-                          <Text style={styles.locationAddress}>{tripDetails.dropoffLocation}</Text>
-                        </View>
-                      </View>
-                    )}
+              {/* MAP */}
+              <View style={styles.mapWrap} onLayout={fitMapToRoute}>
+                {Platform.OS !== 'web' && routeCoords.length > 1 && midRegion ? (
+                  <MapView
+                    ref={mapRef}
+                    provider={PROVIDER_GOOGLE}
+                    style={styles.map}
+                    initialRegion={midRegion}
+                    onMapReady={fitMapToRoute}
+                    toolbarEnabled={false}
+                    rotateEnabled={false}
+                    pitchEnabled={false}
+                    zoomControlEnabled={false}
+                    pointerEvents="none"
+                  >
+                    <Polyline coordinates={routeCoords} strokeWidth={5} strokeColor="#10B981" />
+                    {startMarker && <Marker coordinate={startMarker} title="Start" />}
+                    {endMarker && <Marker coordinate={endMarker} title="End" />}
+                  </MapView>
+                ) : (
+                  <View style={styles.mapFallback}>
+                    <Text style={styles.mapFallbackText}>
+                      {routeCoords.length > 1 ? 'Route preview unavailable on web.' : 'No route data to display.'}
+                    </Text>
                   </View>
                 )}
+              </View>
 
-                {/* Fare Breakdown */}
-                <View style={styles.fareBreakdown}>
-                  <Text style={styles.sectionTitle}>Fare Breakdown</Text>
-                  
-                  <View style={styles.fareRow}>
-                    <Text style={styles.fareLabel}>Base Fare</Text>
-                    <Text style={styles.fareValue}>1,000 MMK</Text>
-                  </View>
-                  
-                  <View style={styles.fareRow}>
-                    <Text style={styles.fareLabel}>
-                      Distance ({tripDetails.distance.toFixed(2)} km × 600 MMK)
-                    </Text>
-                    <Text style={styles.fareValue}>
-                      {Math.round((tripDetails.totalCost - 1000)).toLocaleString()} MMK
-                    </Text>
-                  </View>
-                  
-                  <View style={styles.fareDivider} />
-                  
-                  <View style={styles.fareRow}>
-                    <Text style={styles.fareTotalLabel}>Total Amount</Text>
-                    <Text style={styles.fareTotalValue}>
-                      {formatCurrency(tripDetails.totalCost)}
-                    </Text>
-                  </View>
-                </View>
-              </ScrollView>
-
-              {/* Action Buttons */}
+              {/* Actions */}
               <View style={styles.actionButtons}>
-                <TouchableOpacity 
-                  style={styles.cancelButton}
-                  onPress={onClose}
-                  accessibilityLabel="Cancel trip completion"
-                  accessibilityRole="button"
-                >
-                  <Text style={styles.fareValue}>2,000 MMK</Text>
+                <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
+                  <Text style={styles.cancelButtonText}>Back</Text>
                 </TouchableOpacity>
-                
-                <TouchableOpacity 
-                  style={styles.confirmButton}
-                  onPress={handleConfirm}
-                  accessibilityLabel="Confirm trip completion"
-                  accessibilityRole="button"
-                >
+
+                <TouchableOpacity style={styles.confirmButton} onPress={handleConfirm}>
                   <CheckCircle size={20} color="white" />
                   <Text style={styles.confirmButtonText}>Complete Trip</Text>
                 </TouchableOpacity>
@@ -296,241 +210,30 @@ export default function DropoffDialog({
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  dialogContainer: {
-    backgroundColor: 'white',
-    borderRadius: 24,
-    width: '100%',
-    maxWidth: 400,
-    maxHeight: height * 0.85,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 0.25,
-    shadowRadius: 25,
-    elevation: 25,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 24,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  headerIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#D1FAE5',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  headerTitle: {
-    flex: 1,
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  closeButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  content: {
-    maxHeight: height * 0.6,
-  },
-  priceSection: {
-    alignItems: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 24,
-    backgroundColor: '#F8FAFC',
-    marginHorizontal: 24,
-    marginTop: 16,
-    borderRadius: 16,
-  },
-  priceLabel: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontWeight: '500',
-    marginBottom: 8,
-  },
-  priceAmount: {
-    fontSize: 36,
-    fontWeight: '800',
-    color: '#10B981',
-    marginBottom: 8,
-  },
-  priceSubtext: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    textAlign: 'center',
-  },
-  detailsSection: {
-    paddingHorizontal: 24,
-    paddingVertical: 20,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#374151',
-    marginBottom: 16,
-  },
-  detailRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  detailIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  detailContent: {
-    flex: 1,
-  },
-  detailLabel: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontWeight: '500',
-    marginBottom: 2,
-  },
-  detailValue: {
-    fontSize: 16,
-    color: '#1F2937',
-    fontWeight: '600',
-  },
-  locationSection: {
-    paddingHorizontal: 24,
-    paddingBottom: 20,
-  },
-  locationRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 16,
-  },
-  locationDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginRight: 12,
-    marginTop: 6,
-  },
-  locationContent: {
-    flex: 1,
-  },
-  locationLabel: {
-    fontSize: 12,
-    color: '#6B7280',
-    fontWeight: '500',
-    marginBottom: 4,
-  },
-  locationAddress: {
-    fontSize: 14,
-    color: '#374151',
-    lineHeight: 20,
-  },
-  fareBreakdown: {
-    paddingHorizontal: 24,
-    paddingBottom: 20,
-  },
-  fareRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  fareLabel: {
-    fontSize: 14,
-    color: '#6B7280',
-    flex: 1,
-  },
-  fareValue: {
-    fontSize: 14,
-    color: '#374151',
-    fontWeight: '500',
-  },
-  fareDivider: {
-    height: 1,
-    backgroundColor: '#E5E7EB',
-    marginVertical: 12,
-  },
-  fareTotalLabel: {
-    fontSize: 16,
-    color: '#1F2937',
-    fontWeight: '600',
-  },
-  fareTotalValue: {
-    fontSize: 18,
-    color: '#10B981',
-    fontWeight: '700',
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    paddingHorizontal: 24,
-    paddingBottom: 24,
-    paddingTop: 16,
-    gap: 12,
-  },
-  cancelButton: {
-    flex: 1,
-    paddingVertical: 16,
-    borderRadius: 16,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cancelButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#6B7280',
-  },
-  confirmButton: {
-    flex: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    borderRadius: 16,
-    backgroundColor: '#10B981',
-    gap: 8,
-  },
-  confirmButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  modalOrderText: {
-    fontSize: 14,
-    color: '#374151',
-    marginBottom: 4,
-  },
-  customerInfoText: {
-    fontSize: 14,
-    color: '#1F2937',
-    fontWeight: '500',
-    marginBottom: 4,
-    textAlign: 'center',
-  },
-  orderIdText: {
-    fontSize: 13,
-    color: '#6B7280',
-    fontWeight: '400',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
+  dialogContainer: { backgroundColor: 'white', borderRadius: 24, width: '100%', maxWidth: 420, maxHeight: height * 0.86, overflow: 'hidden' },
+
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 24, paddingTop: 24, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
+  headerIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#D1FAE5', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  headerTitle: { flex: 1, fontSize: 20, fontWeight: '700', color: '#1F2937' },
+  closeButton: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+
+  topBox: { paddingHorizontal: 24, paddingTop: 18, paddingBottom: 10, backgroundColor: '#F8FAFC' },
+  topRow: { marginBottom: 12 },
+  twoCols: { flexDirection: 'row', gap: 16 },
+  col: { flex: 1 },
+  topLabel: { fontSize: 12, color: '#6B7280', fontWeight: '600', marginBottom: 4 },
+  topValue: { fontSize: 16, color: '#111827', fontWeight: '700' },
+  fareValue: { color: '#10B981' },
+
+  mapWrap: { height: 200, marginHorizontal: 24, marginTop: 14, borderRadius: 12, overflow: 'hidden', backgroundColor: '#F3F4F6' },
+  map: { flex: 1 },
+  mapFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  mapFallbackText: { color: '#6B7280' },
+
+  actionButtons: { flexDirection: 'row', paddingHorizontal: 24, paddingBottom: 24, paddingTop: 16, gap: 12 },
+  cancelButton: { flex: 1, paddingVertical: 16, borderRadius: 16, backgroundColor: '#F3F4F6', alignItems: 'center', justifyContent: 'center' },
+  cancelButtonText: { fontSize: 16, fontWeight: '600', color: '#6B7280' },
+  confirmButton: { flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, borderRadius: 16, backgroundColor: '#10B981', gap: 8 },
+  confirmButtonText: { fontSize: 16, fontWeight: '600', color: 'white' },
 });

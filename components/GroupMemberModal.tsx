@@ -1,791 +1,511 @@
-import React, { useState, useEffect, useRef } from 'react';
+// components/GroupMemberModal.tsx
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  Modal,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
-  ScrollView,
-  Animated,
-  Dimensions,
-  Image,
+  Modal, View, Text, TouchableOpacity, StyleSheet,
+  TextInput, ScrollView, Alert, ActivityIndicator
 } from 'react-native';
-import { X, Users, Circle, Crown, Shield, User, Phone, MessageCircle, MoveVertical as MoreVertical, UserPlus, Search, Filter } from 'lucide-react-native';
+import {
+  X, UserPlus, Trash2, Shield, ShieldOff,
+  Link as LinkIcon, Copy as CopyIcon
+} from 'lucide-react-native';
+import { setStringAsync } from 'expo-clipboard';
+import {
+  addGroupMember, removeGroupMember, setGroupMemberRole,
+  fetchAvailableUsers, getGroupInviteLink
+} from '../app/lib/chatApi';
+import { getSocket } from '../app/lib/socket';
 
-const { width, height } = Dimensions.get('window');
-
-interface GroupMember {
+type Member = {
   id: string;
   name: string;
-  username?: string;
-  phone?: string;
-  profileImage?: string;
-  status: 'online' | 'offline' | 'away' | 'busy';
-  lastSeen?: string;
+  phone: string | null;
   role: 'admin' | 'moderator' | 'member';
   joinedAt: string;
-  isTyping?: boolean;
-}
+  status: 'online' | 'offline' | 'away' | 'busy';
+};
 
-interface GroupMemberModalProps {
-  visible: boolean;
-  onClose: () => void;
-  groupName: string;
-  groupId: string;
-  members: GroupMember[];
-  currentUserId: string;
-  onCallMember?: (memberId: string, phone: string) => void;
-  onMessageMember?: (memberId: string) => void;
-  onManageMember?: (memberId: string, action: 'promote' | 'demote' | 'remove') => void;
-}
+// helper near top of the file
+const toLocal = (p?: string | null) => {
+  if (!p) return '—';
+  const DIAL = '+95'; // or keep synced with server DEFAULT_DIAL
+  if (p.startsWith(DIAL)) return `0${p.slice(DIAL.length)}`;
+  return p;
+};
 
-const mockMembers: GroupMember[] = [
-  {
-    id: '1',
-    name: 'Ko Thant Zin',
-    username: 'thantzin_driver',
-    phone: '+95 9 123 456 789',
-    status: 'online',
-    role: 'admin',
-    joinedAt: '2023-01-15',
-    isTyping: false,
-  },
-  {
-    id: '2',
-    name: 'Ma Khin Myo',
-    username: 'khinmyo_taxi',
-    phone: '+95 9 987 654 321',
-    status: 'online',
-    role: 'moderator',
-    joinedAt: '2023-02-20',
-    isTyping: true,
-  },
-  {
-    id: '3',
-    name: 'U Aung Win',
-    username: 'aungwin_driver',
-    phone: '+95 9 555 123 456',
-    status: 'away',
-    lastSeen: '5 minutes ago',
-    role: 'member',
-    joinedAt: '2023-03-10',
-  },
-  {
-    id: '4',
-    name: 'Daw Mya Thida',
-    username: 'myathida_cab',
-    phone: '+95 9 777 888 999',
-    status: 'offline',
-    lastSeen: '2 hours ago',
-    role: 'member',
-    joinedAt: '2023-04-05',
-  },
-  {
-    id: '5',
-    name: 'Ko Zaw Myo',
-    username: 'zawmyo_taxi',
-    phone: '+95 9 111 222 333',
-    status: 'busy',
-    lastSeen: 'Active now',
-    role: 'member',
-    joinedAt: '2023-05-12',
-  },
-  {
-    id: '6',
-    name: 'Ma Hnin Wai',
-    username: 'hninwai_driver',
-    phone: '+95 9 444 555 666',
-    status: 'online',
-    role: 'member',
-    joinedAt: '2023-06-18',
-  },
-];
+
+const statusColor = (s: Member['status']) => {
+  switch (s) {
+    case 'online': return '#10B981';
+    case 'away': return '#F59E0B';
+    case 'busy': return '#EF4444';
+    default: return '#9CA3AF';
+  }
+};
 
 export default function GroupMemberModal({
   visible,
   onClose,
   groupName,
   groupId,
-  members = mockMembers,
-  currentUserId = '1',
+  members,
+  currentUserId,
   onCallMember,
   onMessageMember,
-  onManageMember,
-}: GroupMemberModalProps) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filteredMembers, setFilteredMembers] = useState<GroupMember[]>(members);
-  const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all');
-  const [selectedMember, setSelectedMember] = useState<GroupMember | null>(null);
-  const [showMemberActions, setShowMemberActions] = useState(false);
+  canManageMembers = false,
+  onMembersChanged,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  groupName: string;
+  groupId: string;
+  members: Member[];
+  currentUserId: string;
+  onCallMember: (memberId: string, phone: string | null) => void;
+  onMessageMember: (memberId: string, memberName: string) => void;
+  canManageMembers?: boolean;
+  onMembersChanged?: () => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [input, setInput] = useState(''); // phone or user id
+  const [tab, setTab] = useState<'ALL' | 'ONLINE'>('ALL');
 
-  // Animation values
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(height)).current;
-  const typingAnim = useRef(new Animated.Value(0)).current;
+  // Real-time presence state
+  const [memberPresence, setMemberPresence] = useState<Map<string, 'online' | 'offline' | 'away' | 'busy'>>(new Map());
 
-  // Simulate real-time status updates
+  // Invite panel state
+  const [showInvite, setShowInvite] = useState(false);
+  const [inviteUrl, setInviteUrl] = useState<string>('');
+  const [lookup, setLookup] = useState(''); // search box
+  const [loadingAvail, setLoadingAvail] = useState(false);
+  const [available, setAvailable] = useState<Array<{ id: string; name: string; phone: string | null }>>([]);
+
+  const safeRefresh = async () => {
+    try { await onMembersChanged?.(); } catch {}
+  };
+
+  // Real-time presence subscription
+  useEffect(() => {
+    if (!visible || !groupId) return;
+    
+    let cleanup: (() => void) | undefined;
+    
+    (async () => {
+      try {
+        const socket = await getSocket();
+        
+        console.log('[GroupMemberModal] Subscribing to presence for group:', groupId);
+        
+        // Subscribe to presence updates for this conversation
+        socket.emit('presence:subscribe', { conversationId: groupId });
+        
+        // Also announce our own presence in this conversation to ensure we're marked online
+        socket.emit('presence:here', { conversationId: groupId, status: 'online' });
+        
+        // Handle bulk presence updates (initial snapshot)
+        const onPresenceBulk = (data: { conversationId: string; states: Array<{ userId: string; status: string }> }) => {
+          if (data.conversationId !== groupId) return;
+          console.log('[GroupMemberModal] Received bulk presence for', groupId, ':', data.states);
+          
+          const newPresence = new Map<string, 'online' | 'offline' | 'away' | 'busy'>();
+          data.states.forEach(state => {
+            const status = ['online', 'offline', 'away', 'busy'].includes(state.status) 
+              ? state.status as 'online' | 'offline' | 'away' | 'busy'
+              : 'offline';
+            newPresence.set(state.userId, status);
+            console.log('[GroupMemberModal] Setting presence for user', state.userId, 'to', status);
+          });
+          setMemberPresence(newPresence);
+        };
+        
+        // Handle individual presence updates
+        const onPresenceUpdate = (data: { conversationId: string; userId: string; status: string }) => {
+          if (data.conversationId !== groupId) return;
+          console.log('[GroupMemberModal] Received presence update:', data.userId, data.status);
+          
+          const status = ['online', 'offline', 'away', 'busy'].includes(data.status) 
+            ? data.status as 'online' | 'offline' | 'away' | 'busy'
+            : 'offline';
+          
+          setMemberPresence(prev => {
+            const newMap = new Map(prev);
+            newMap.set(data.userId, status);
+            return newMap;
+          });
+        };
+        
+        socket.on('presence:bulk', onPresenceBulk);
+        socket.on('presence:update', onPresenceUpdate);
+        
+        cleanup = () => {
+          console.log('[GroupMemberModal] Cleaning up presence subscription');
+          socket.emit('presence:unsubscribe', { conversationId: groupId });
+          socket.off('presence:bulk', onPresenceBulk);
+          socket.off('presence:update', onPresenceUpdate);
+        };
+      } catch (error) {
+        console.error('[GroupMemberModal] Failed to setup presence subscription:', error);
+      }
+    })();
+    
+    return cleanup;
+  }, [visible, groupId]);
+
+  // Auto-open Invite when you're the only member (nice UX)
   useEffect(() => {
     if (!visible) return;
+    if (canManageMembers && members.length <= 1) {
+      setShowInvite(true);
+    }
+  }, [visible, canManageMembers, members.length]);
 
-    const statusUpdateInterval = setInterval(() => {
-      // Simulate random status changes for demo
-      const randomMember = members[Math.floor(Math.random() * members.length)];
-      const statuses: GroupMember['status'][] = ['online', 'offline', 'away', 'busy'];
-      const newStatus = statuses[Math.floor(Math.random() * statuses.length)];
-      
-      // Update member status (in real app, this would come from WebSocket)
-      setFilteredMembers(prev => 
-        prev.map(member => 
-          member.id === randomMember.id 
-            ? { ...member, status: newStatus, lastSeen: newStatus === 'offline' ? 'Just now' : undefined }
-            : member
-        )
-      );
-    }, 10000); // Update every 10 seconds for demo
-
-    return () => clearInterval(statusUpdateInterval);
-  }, [visible, members]);
-
-  // Typing animation
+  // Fetch invite link when opening the invite panel
   useEffect(() => {
-    const typingAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(typingAnim, {
-          toValue: 1,
-          duration: 600,
-          useNativeDriver: true,
-        }),
-        Animated.timing(typingAnim, {
-          toValue: 0,
-          duration: 600,
-          useNativeDriver: true,
-        }),
-      ])
-    );
+    if (!showInvite) return;
+    (async () => {
+      try {
+        const { url } = await getGroupInviteLink(groupId);
+        setInviteUrl(url);
+      } catch (e: any) {
+        Alert.alert('Error', e?.message || 'Failed to get invite link');
+      }
+    })();
+  }, [showInvite, groupId]);
 
-    typingAnimation.start();
-    return () => typingAnimation.stop();
-  }, []);
+  // Helper to fetch available users (used by effect + "Fetch" button)
+  const fetchAvail = useCallback(async () => {
+    setLoadingAvail(true);
+    try {
+      const list = await fetchAvailableUsers(groupId, lookup.trim() || undefined);
+      setAvailable(list);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to load users');
+    } finally {
+      setLoadingAvail(false);
+    }
+  }, [groupId, lookup]);
 
-  // Modal animations
+  // Fetch available users on open + when lookup changes (debounced)
   useEffect(() => {
-    if (visible) {
-      setFilteredMembers(members);
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.spring(slideAnim, {
-          toValue: 0,
-          tension: 100,
-          friction: 8,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 0,
-          duration: 200,
-          useNativeDriver: true,
-        }),
-        Animated.timing(slideAnim, {
-          toValue: height,
-          duration: 200,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    }
-  }, [visible]);
+    if (!showInvite) return;
+    const t = setTimeout(fetchAvail, 250);
+    return () => clearTimeout(t);
+  }, [showInvite, lookup, fetchAvail]);
 
-  // Filter members based on search and status
-  useEffect(() => {
-    let filtered = members;
-
-    // Apply search filter
-    if (searchQuery.trim()) {
-      filtered = filtered.filter(member =>
-        member.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        member.username?.toLowerCase().includes(searchQuery.toLowerCase())
-      );
-    }
-
-    // Apply status filter
-    if (statusFilter !== 'all') {
-      filtered = filtered.filter(member => member.status === statusFilter);
-    }
-
-    setFilteredMembers(filtered);
-  }, [searchQuery, statusFilter, members]);
-
-  const getStatusColor = (status: GroupMember['status']) => {
-    switch (status) {
-      case 'online':
-        return '#10B981';
-      case 'away':
-        return '#F59E0B';
-      case 'busy':
-        return '#EF4444';
-      case 'offline':
-      default:
-        return '#9CA3AF';
+  const doAdd = async () => {
+    const value = input.trim();
+    if (!value) return Alert.alert('Validation', 'Enter a phone number or user id.');
+    try {
+      setAdding(true);
+      await addGroupMember(groupId, value);
+      setInput('');
+      await safeRefresh();
+      Alert.alert('Success', 'Member added.');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to add member.');
+    } finally {
+      setAdding(false);
     }
   };
 
-  const getStatusText = (status: GroupMember['status']) => {
-    switch (status) {
-      case 'online':
-        return 'Online';
-      case 'away':
-        return 'Away';
-      case 'busy':
-        return 'Busy';
-      case 'offline':
-      default:
-        return 'Offline';
+  const addFromResult = async (userId: string) => {
+    try {
+      await addGroupMember(groupId, userId);
+      setAvailable(prev => prev.filter(u => u.id !== userId)); // remove from list
+      await safeRefresh();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to add member.');
     }
   };
 
-  const getRoleIcon = (role: GroupMember['role']) => {
-    switch (role) {
-      case 'admin':
-        return <Crown size={16} color="#F59E0B" />;
-      case 'moderator':
-        return <Shield size={16} color="#3B82F6" />;
-      default:
-        return null;
+  const promote = async (member: Member) => {
+    try {
+      await setGroupMemberRole(groupId, member.id, 'moderator');
+      await safeRefresh();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to promote.');
+    }
+  };
+  const makeAdmin = async (member: Member) => {
+    try {
+      await setGroupMemberRole(groupId, member.id, 'admin');
+      await safeRefresh();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to set admin.');
+    }
+  };
+  const demote = async (member: Member) => {
+    try {
+      await setGroupMemberRole(groupId, member.id, 'member');
+      await safeRefresh();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to demote.');
     }
   };
 
-  const handleMemberPress = (member: GroupMember) => {
-    setSelectedMember(member);
-    setShowMemberActions(true);
-  };
+  const shown = useMemo(() => {
+    // Merge members with real-time presence data
+    const membersWithLivePresence = members.map(member => ({
+      ...member,
+      status: memberPresence.get(member.id) || member.status
+    }));
+    
+    return tab === 'ONLINE' 
+      ? membersWithLivePresence.filter(m => m.status === 'online') 
+      : membersWithLivePresence;
+  }, [members, tab, memberPresence]);
 
-  const handleCallMember = () => {
-    if (selectedMember?.phone && onCallMember) {
-      onCallMember(selectedMember.id, selectedMember.phone);
-      setShowMemberActions(false);
+  const copyLink = async () => {
+    if (!inviteUrl) return;
+    try {
+      await setStringAsync(inviteUrl);
+      Alert.alert('Copied', 'Invite link copied to clipboard.');
+    } catch {
+      Alert.alert('Invite link', inviteUrl);
     }
   };
 
-  const handleMessageMember = () => {
-    if (selectedMember && onMessageMember) {
-      onMessageMember(selectedMember.id);
-      setShowMemberActions(false);
-    }
-  };
-
-  const renderMemberItem = (member: GroupMember) => {
-    const isCurrentUser = member.id === currentUserId;
-    const statusColor = getStatusColor(member.status);
-
-    return (
-      <TouchableOpacity
-        key={member.id}
-        style={[
-          styles.memberItem,
-          isCurrentUser && styles.currentUserItem,
-        ]}
-        onPress={() => handleMemberPress(member)}
-        disabled={isCurrentUser}
-      >
-        <View style={styles.memberLeft}>
-          {/* Profile Picture */}
-          <View style={styles.avatarContainer}>
-            {member.profileImage ? (
-              <Image source={{ uri: member.profileImage }} style={styles.avatar} />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <User size={24} color="#6B7280" />
-              </View>
-            )}
-            
-            {/* Status Indicator */}
-            <View style={[styles.statusIndicator, { backgroundColor: statusColor }]} />
-          </View>
-
-          {/* Member Info */}
-          <View style={styles.memberInfo}>
-            <View style={styles.memberNameRow}>
-              <Text style={[
-                styles.memberName,
-                isCurrentUser && styles.currentUserName,
-              ]}>
-                {member.name} {isCurrentUser && '(You)'}
-              </Text>
-              {getRoleIcon(member.role)}
-            </View>
-            
-            <View style={styles.memberStatusRow}>
-              <Text style={[styles.memberStatus, { color: statusColor }]}>
-                {getStatusText(member.status)}
-              </Text>
-              {member.lastSeen && member.status === 'offline' && (
-                <Text style={styles.lastSeen}>• {member.lastSeen}</Text>
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.overlay}>
+        <View style={styles.sheet}>
+          <View style={styles.header}>
+            <Text style={styles.title}>{groupName}</Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {canManageMembers && (
+                <TouchableOpacity onPress={() => setShowInvite(v => !v)} style={styles.inviteBtn}>
+                  <LinkIcon size={16} color="white" />
+                  <Text style={styles.inviteTxt}>{showInvite ? 'Hide invite' : 'Invite'}</Text>
+                </TouchableOpacity>
               )}
-              {member.isTyping && (
-                <Animated.View style={[
-                  styles.typingIndicator,
-                  {
-                    opacity: typingAnim,
-                  }
-                ]}>
-                  <Text style={styles.typingText}>typing...</Text>
-                </Animated.View>
-              )}
-            </View>
-            
-            {member.username && (
-              <Text style={styles.memberUsername}>@{member.username}</Text>
-            )}
-          </View>
-        </View>
-
-        {/* Member Actions */}
-        {!isCurrentUser && (
-          <View style={styles.memberActions}>
-            <TouchableOpacity style={styles.actionButton}>
-              <MoreVertical size={20} color="#9CA3AF" />
-            </TouchableOpacity>
-          </View>
-        )}
-      </TouchableOpacity>
-    );
-  };
-
-  const renderMemberActions = () => (
-    <Modal
-      visible={showMemberActions}
-      transparent
-      animationType="fade"
-      onRequestClose={() => setShowMemberActions(false)}
-    >
-      <TouchableWithoutFeedback onPress={() => setShowMemberActions(false)}>
-        <View style={styles.actionModalOverlay}>
-          <View style={styles.actionModalContent}>
-            <View style={styles.actionModalHeader}>
-              <Text style={styles.actionModalTitle}>{selectedMember?.name}</Text>
-              <TouchableOpacity onPress={() => setShowMemberActions(false)}>
+              <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
                 <X size={20} color="#6B7280" />
               </TouchableOpacity>
             </View>
-            
-            <View style={styles.actionsList}>
-              {selectedMember?.phone && (
-                <TouchableOpacity style={styles.actionItem} onPress={handleCallMember}>
-                  <Phone size={20} color="#10B981" />
-                  <Text style={styles.actionText}>Call Member</Text>
+          </View>
+
+          {/* Invite panel */}
+          {canManageMembers && showInvite && (
+            <View style={styles.invitePanel}>
+              <Text style={styles.inviteLabel}>Invite link</Text>
+              <View style={styles.linkRow}>
+                <Text numberOfLines={1} style={styles.linkText}>{inviteUrl || 'Generating…'}</Text>
+                <TouchableOpacity onPress={copyLink} style={styles.copyBtn} disabled={!inviteUrl}>
+                  <CopyIcon size={16} color="white" />
+                  <Text style={styles.copyTxt}>Copy</Text>
                 </TouchableOpacity>
-              )}
-              
-              <TouchableOpacity style={styles.actionItem} onPress={handleMessageMember}>
-                <MessageCircle size={20} color="#3B82F6" />
-                <Text style={styles.actionText}>Send Private Message</Text>
-              </TouchableOpacity>
-              
-              {/* Admin/Moderator actions */}
-              {(currentUserId === '1' || members.find(m => m.id === currentUserId)?.role === 'admin') && (
-                <>
-                  <View style={styles.actionDivider} />
-                  <TouchableOpacity style={styles.actionItem}>
-                    <Shield size={20} color="#F59E0B" />
-                    <Text style={styles.actionText}>Make Moderator</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.actionItem}>
-                    <X size={20} color="#EF4444" />
-                    <Text style={[styles.actionText, styles.dangerAction]}>Remove from Group</Text>
-                  </TouchableOpacity>
-                </>
+              </View>
+
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 }}>
+                <Text style={[styles.inviteLabel, { marginTop: 0, marginBottom: 0 }]}>Search users</Text>
+                <TouchableOpacity onPress={fetchAvail} style={styles.fetchBtn}>
+                  <Text style={styles.fetchTxt}>Fetch</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TextInput
+                style={styles.searchInput}
+                value={lookup}
+                onChangeText={setLookup}
+                placeholder="Search by phone or name"
+              />
+
+              <View style={styles.tableHeader}>
+                <Text style={[styles.th, { flex: 2 }]}>Name</Text>
+                <Text style={[styles.th, { flex: 2 }]}>Phone</Text>
+                <Text style={[styles.th, { width: 64, textAlign: 'right' }]}>Action</Text>
+              </View>
+
+              {loadingAvail ? (
+                <ActivityIndicator style={{ paddingVertical: 10 }} />
+              ) : (
+                <View style={styles.availList}>
+                  {available.length === 0 ? (
+                    <Text style={styles.emptyAvail}>
+                      No users found{lookup ? ' for this query' : ' to add'}.
+                    </Text>
+                  ) : (
+                    available.map(u => (
+                      <View key={u.id} style={styles.availRow}>
+                        <Text style={[styles.td, { flex: 2 }]} numberOfLines={1}>{u.name}</Text>
+                        <Text style={[styles.td, { flex: 2 }]} numberOfLines={1}>{toLocal(u.phone) || '—'}</Text>
+                        <View style={{ width: 64, alignItems: 'flex-end' }}>
+                          <TouchableOpacity onPress={() => addFromResult(u.id)} style={styles.addMiniBtn}>
+                            <UserPlus size={16} color="white" />
+                            <Text style={styles.addTxtMini}>Add</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))
+                  )}
+                </View>
               )}
             </View>
+          )}
+
+          {/* Tabs */}
+          <View style={styles.tabs}>
+            <TouchableOpacity onPress={() => setTab('ALL')} style={[styles.tab, tab === 'ALL' && styles.tabActive]}>
+              <Text style={[styles.tabTxt, tab === 'ALL' && styles.tabTxtActive]}>All</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setTab('ONLINE')} style={[styles.tab, tab === 'ONLINE' && styles.tabActive]}>
+              <Text style={[styles.tabTxt, tab === 'ONLINE' && styles.tabTxtActive]}>Online</Text>
+            </TouchableOpacity>
           </View>
-        </View>
-      </TouchableWithoutFeedback>
-    </Modal>
-  );
 
-  if (!visible) return null;
+          {/* Quick add by phone/id */}
+          {canManageMembers && (
+            <View style={styles.addRow}>
+              <TextInput
+                style={styles.input}
+                value={input}
+                onChangeText={setInput}
+                placeholder="Phone number or user id"
+                keyboardType="default"
+              />
+              <TouchableOpacity style={styles.addBtn} onPress={doAdd} disabled={adding}>
+                <UserPlus size={18} color="white" />
+                <Text style={styles.addTxt}>{adding ? 'Adding…' : 'Add'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
-  const onlineCount = filteredMembers.filter(m => m.status === 'online').length;
-  const totalMembers = members.length;
-
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="none"
-      onRequestClose={onClose}
-    >
-      <TouchableWithoutFeedback onPress={onClose}>
-        <Animated.View style={[styles.overlay, { opacity: fadeAnim }]}>
-          <TouchableWithoutFeedback onPress={() => {}}>
-            <Animated.View style={[
-              styles.modalContainer,
-              { transform: [{ translateY: slideAnim }] }
-            ]}>
-              {/* Header */}
-              <View style={styles.header}>
-                <View style={styles.headerLeft}>
-                  <View style={styles.headerIcon}>
-                    <Users size={24} color="#3B82F6" />
-                  </View>
-                  <View style={styles.headerInfo}>
-                    <Text style={styles.headerTitle}>{groupName}</Text>
-                    <Text style={styles.headerSubtitle}>
-                      {onlineCount} online • {totalMembers} members
-                    </Text>
-                  </View>
-                </View>
-                
-                <View style={styles.headerActions}>
-                  <TouchableOpacity style={styles.addMemberButton}>
-                    <UserPlus size={20} color="#3B82F6" />
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-                    <X size={24} color="#6B7280" />
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {/* Filters */}
-              <View style={styles.filtersContainer}>
-                <View style={styles.statusFilters}>
-                  {['all', 'online', 'offline'].map(filter => (
-                    <TouchableOpacity
-                      key={filter}
-                      style={[
-                        styles.filterButton,
-                        statusFilter === filter && styles.activeFilterButton,
-                      ]}
-                      onPress={() => setStatusFilter(filter as any)}
-                    >
-                      <Text style={[
-                        styles.filterText,
-                        statusFilter === filter && styles.activeFilterText,
-                      ]}>
-                        {filter === 'all' ? 'All' : filter === 'online' ? 'Online' : 'Offline'}
-                        {filter === 'online' && ` (${onlineCount})`}
-                        {filter === 'offline' && ` (${totalMembers - onlineCount})`}
+          {/* Members list */}
+          <ScrollView style={{ maxHeight: 420 }}>
+            {shown?.length ? (
+              shown.map((m) => {
+                const isSelf = String(m.id) === String(currentUserId);
+                return (
+                  <View key={m.id} style={styles.row}>
+                    <View style={[styles.dot, { backgroundColor: statusColor(m.status) }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.name}>
+                        {m.name}{isSelf ? ' (You)' : ''}
                       </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
+                      <Text style={styles.sub}>
+                        {toLocal(m.phone) || 'No phone'} • {m.role} • {m.status}
+                      </Text>
+                    </View>
 
-              {/* Members List */}
-              <ScrollView 
-                style={styles.membersList}
-                showsVerticalScrollIndicator={false}
-              >
-                {filteredMembers.length === 0 ? (
-                  <View style={styles.emptyState}>
-                    <Users size={48} color="#9CA3AF" />
-                    <Text style={styles.emptyStateTitle}>No Members Found</Text>
-                    <Text style={styles.emptyStateText}>
-                      {searchQuery ? 'Try adjusting your search' : 'No members match the current filter'}
-                    </Text>
+                    <View style={styles.actions}>
+                      {!isSelf && (
+                        <>
+                          <TouchableOpacity onPress={() => onMessageMember(m.id, m.name)} style={styles.pill}>
+                            <Text style={styles.pillTxt}>Message</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => onCallMember(m.id, toLocal(m.phone))} style={styles.pill}>
+                            <Text style={styles.pillTxt}>Call</Text>
+                          </TouchableOpacity>
+                        </>
+                      )}
+
+                      {canManageMembers && !isSelf && (
+                        <>
+                          {m.role !== 'admin' && (
+                            <TouchableOpacity onPress={() => makeAdmin(m)} style={[styles.iconBtn, { backgroundColor: '#111827' }]}>
+                              <Shield size={16} color="white" />
+                            </TouchableOpacity>
+                          )}
+                          {m.role === 'member' && (
+                            <TouchableOpacity onPress={() => promote(m)} style={[styles.iconBtn, { backgroundColor: '#2563EB' }]}>
+                              <Shield size={16} color="white" />
+                            </TouchableOpacity>
+                          )}
+                          {m.role !== 'member' && (
+                            <TouchableOpacity onPress={() => demote(m)} style={[styles.iconBtn, { backgroundColor: '#F59E0B' }]}>
+                              <ShieldOff size={16} color="white" />
+                            </TouchableOpacity>
+                          )}
+                          <TouchableOpacity
+                            onPress={() => {
+                              Alert.alert('Remove Member', `Remove ${m.name} from ${groupName}?`, [
+                                { text: 'Cancel', style: 'cancel' },
+                                {
+                                  text: 'Remove',
+                                  style: 'destructive',
+                                  onPress: async () => {
+                                    try {
+                                      await removeGroupMember(groupId, m.id);
+                                      await onMembersChanged?.();
+                                    } catch (e: any) {
+                                      Alert.alert('Error', e?.message || 'Failed to remove member.');
+                                    }
+                                  }
+                                },
+                              ]);
+                            }}
+                            style={[styles.iconBtn, { backgroundColor: '#EF4444' }]}
+                          >
+                            <Trash2 size={16} color="white" />
+                          </TouchableOpacity>
+                        </>
+                      )}
+                    </View>
                   </View>
-                ) : (
-                  filteredMembers.map(renderMemberItem)
-                )}
-              </ScrollView>
-
-              {/* Footer */}
-              <View style={styles.footer}>
-                <Text style={styles.footerText}>
-                  Group created • {new Date().toLocaleDateString()}
-                </Text>
-              </View>
-
-              {/* Member Actions Modal */}
-              {renderMemberActions()}
-            </Animated.View>
-          </TouchableWithoutFeedback>
-        </Animated.View>
-      </TouchableWithoutFeedback>
+                );
+              })
+            ) : (
+              <Text style={{ color: '#6B7280', padding: 12 }}>
+                No members to show.
+              </Text>
+            )}
+          </ScrollView>
+        </View>
+      </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContainer: {
-    backgroundColor: 'white',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: height * 0.85,
-    minHeight: height * 0.6,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  headerIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#EBF4FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  headerInfo: {
-    flex: 1,
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1F2937',
-    marginBottom: 2,
-  },
-  headerSubtitle: {
-    fontSize: 14,
-    color: '#6B7280',
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  addMemberButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#EBF4FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  filtersContainer: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  statusFilters: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  filterButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: '#F3F4F6',
-  },
-  activeFilterButton: {
-    backgroundColor: '#3B82F6',
-  },
-  filterText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#6B7280',
-  },
-  activeFilterText: {
-    color: 'white',
-  },
-  membersList: {
-    flex: 1,
-    paddingHorizontal: 20,
-  },
-  memberItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  currentUserItem: {
-    backgroundColor: '#F8FAFC',
-    marginHorizontal: -20,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-  },
-  memberLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  avatarContainer: {
-    position: 'relative',
-    marginRight: 12,
-  },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-  },
-  avatarPlaceholder: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#E5E7EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statusIndicator: {
-    position: 'absolute',
-    bottom: 2,
-    right: 2,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 2,
-    borderColor: 'white',
-  },
-  memberInfo: {
-    flex: 1,
-  },
-  memberNameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-    gap: 8,
-  },
-  memberName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-  },
-  currentUserName: {
-    color: '#3B82F6',
-  },
-  memberStatusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 2,
-  },
-  memberStatus: {
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  lastSeen: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginLeft: 4,
-  },
-  typingIndicator: {
-    marginLeft: 8,
-  },
-  typingText: {
-    fontSize: 12,
-    color: '#3B82F6',
-    fontStyle: 'italic',
-  },
-  memberUsername: {
-    fontSize: 12,
-    color: '#9CA3AF',
-  },
-  memberActions: {
-    marginLeft: 12,
-  },
-  actionButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  footer: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB',
-    alignItems: 'center',
-  },
-  footerText: {
-    fontSize: 12,
-    color: '#9CA3AF',
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 40,
-  },
-  emptyStateTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#6B7280',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyStateText: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    textAlign: 'center',
-  },
-  actionModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  actionModalContent: {
-    backgroundColor: 'white',
-    borderRadius: 16,
-    width: '100%',
-    maxWidth: 300,
-  },
-  actionModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-  },
-  actionModalTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#1F2937',
-  },
-  actionsList: {
-    paddingVertical: 8,
-  },
-  actionItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    gap: 12,
-  },
-  actionText: {
-    fontSize: 16,
-    color: '#374151',
-    fontWeight: '500',
-  },
-  dangerAction: {
-    color: '#EF4444',
-  },
-  actionDivider: {
-    height: 1,
-    backgroundColor: '#E5E7EB',
-    marginVertical: 8,
-  },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  sheet: { backgroundColor: 'white', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingBottom: 16 },
+
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#E5E7EB' },
+  title: { fontSize: 16, fontWeight: '700', color: '#111827' },
+  closeBtn: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F3F4F6' },
+
+  inviteBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#4F46E5', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
+  inviteTxt: { color: 'white', fontWeight: '700', fontSize: 12 },
+
+  invitePanel: { margin: 12, padding: 12, borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, backgroundColor: '#F9FAFB' },
+  inviteLabel: { color: '#6B7280', fontSize: 12, marginBottom: 6 },
+  linkRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  linkText: { flex: 1, color: '#111827' },
+  copyBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#111827', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
+  copyTxt: { color: 'white', fontWeight: '700', fontSize: 12 },
+
+  fetchBtn: { borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: 'white' },
+  fetchTxt: { color: '#111827', fontWeight: '700', fontSize: 12 },
+
+  searchInput: { borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16 },
+
+  tableHeader: { flexDirection: 'row', paddingTop: 8, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: '#F3F4F6', marginTop: 6 },
+  th: { color: '#6B7280', fontSize: 12, fontWeight: '700' },
+  td: { color: '#111827', fontSize: 14 },
+
+  availList: { marginTop: 6 },
+  availRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F3F4F6', gap: 8 },
+  addMiniBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#10B981', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
+  addTxtMini: { color: 'white', fontWeight: '700', fontSize: 12 },
+  emptyAvail: { color: '#6B7280', paddingVertical: 6 },
+
+  tabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingTop: 6 },
+  tab: { paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 999 },
+  tabActive: { backgroundColor: '#EEF2FF', borderColor: '#6366F1' },
+  tabTxt: { color: '#6B7280', fontWeight: '600' },
+  tabTxtActive: { color: '#3730A3' },
+
+  addRow: { flexDirection: 'row', gap: 8, padding: 12 },
+  input: { flex: 1, borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16 },
+  addBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#10B981', paddingHorizontal: 12, borderRadius: 8 },
+  addTxt: { color: 'white', fontWeight: '600' },
+
+  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
+  dot: { width: 10, height: 10, borderRadius: 5, marginRight: 10 },
+  name: { fontSize: 15, fontWeight: '600', color: '#111827' },
+  sub: { fontSize: 12, color: '#6B7280' },
+
+  actions: { flexDirection: 'row', alignItems: 'center', gap: 6, marginLeft: 8 },
+  pill: { borderWidth: 1, borderColor: '#D1D5DB', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
+  pillTxt: { color: '#111827', fontSize: 12, fontWeight: '600' },
+  iconBtn: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
 });

@@ -194,3 +194,20 @@ The app supports complete bilingual functionality:
 - **Expo Camera** for profile photos
 
 ## 📄 License
+
+# Messaging Route
+GET /chat/conversations (all convs w/ last message)
+
+POST /chat/conversations/private
+
+POST /chat/conversations/group
+
+GET /chat/conversations/:id
+
+GET /chat/conversations/:id/messages
+
+POST /chat/conversations/:id/messages (TEXT / IMAGE / VOICE / ORDER)
+
+POST /chat/messages/:id/delivered
+
+POST /chat/messages/:id/read
