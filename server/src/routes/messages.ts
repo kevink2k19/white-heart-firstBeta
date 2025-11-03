@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { prisma } from "../index.js";
 import { requireAuth, AuthedRequest } from "../middleware/requireAuth.js";
-import { PrismaClient } from "@prisma/client";
 import { io, roomFor } from "../socket.js";
 
 // Define MessageType enum locally since Prisma doesn't export it
@@ -146,41 +145,37 @@ router.post("/conversations/:id/messages", async (req: AuthedRequest, res) => {
       return res.status(400).json({ error: "Unsupported message type" });
   }
 
-  const created = await prisma.$transaction(async (tx: PrismaClient) => {
-    const message = await tx.message.create({
-      data: {
-        conversationId,
-        senderId: userId,
-        type: msgType,
-        text: text?.trim() || null,
-        mediaUrl: mediaUrl || null,
-        mediaKind:
-          mediaKind ||
-          (msgType === "VOICE" ? "audio" : msgType === "IMAGE" ? "image" : null),
-        mediaDurationS: mediaDurationS ?? null,
-        orderPayload: msgType === "ORDER" ? (orderPayload as any) : null,
-        latitude: msgType === "LOCATION" ? latitude : null,
-        longitude: msgType === "LOCATION" ? longitude : null,
-        locationAddress: msgType === "LOCATION" ? locationAddress : null,
-      },
-      include: { sender: { select: { id: true, name: true } } },
-    });
+  const created = await prisma.message.create({
+    data: {
+      conversationId,
+      senderId: userId,
+      type: msgType,
+      text: text?.trim() || null,
+      mediaUrl: mediaUrl || null,
+      mediaKind:
+        mediaKind ||
+        (msgType === "VOICE" ? "audio" : msgType === "IMAGE" ? "image" : null),
+      mediaDurationS: mediaDurationS ?? null,
+      orderPayload: msgType === "ORDER" ? (orderPayload as any) : null,
+      latitude: msgType === "LOCATION" ? latitude : null,
+      longitude: msgType === "LOCATION" ? longitude : null,
+      locationAddress: msgType === "LOCATION" ? locationAddress : null,
+    },
+    include: { sender: { select: { id: true, name: true } } },
+  });
 
-    const participants = await tx.conversationParticipant.findMany({
-      where: { conversationId },
-      select: { userId: true },
-    });
+  const participants = await prisma.conversationParticipant.findMany({
+    where: { conversationId },
+    select: { userId: true },
+  });
 
-    await tx.messageStatus.createMany({
-      data: participants.map((p: any) => ({
-        messageId: message.id,
-        userId: p.userId,
-        deliveredAt: p.userId === userId ? new Date() : null,
-        readAt: p.userId === userId ? new Date() : null,
-      })),
-    });
-
-    return message;
+  await prisma.messageStatus.createMany({
+    data: participants.map((p: any) => ({
+      messageId: created.id,
+      userId: p.userId,
+      deliveredAt: p.userId === userId ? new Date() : null,
+      readAt: p.userId === userId ? new Date() : null,
+    })),
   });
 
   const wire = {
@@ -284,13 +279,11 @@ router.delete("/messages/:id", async (req: AuthedRequest, res) => {
   }
 
   // Delete the message and its statuses for everyone
-  await prisma.$transaction(async (tx: PrismaClient) => {
-    await tx.messageStatus.deleteMany({
-      where: { messageId },
-    });
-    await tx.message.delete({
-      where: { id: messageId },
-    });
+  await prisma.messageStatus.deleteMany({
+    where: { messageId },
+  });
+  await prisma.message.delete({
+    where: { id: messageId },
   });
 
   // Notify other clients about the deletion
